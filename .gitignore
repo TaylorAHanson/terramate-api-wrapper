@@ -16,5 +16,9 @@ dist/
 
 .DS_Store
 
+# dev.sh local run logs
+backend.log
+frontend.log
+
 # Isaac local tool state — never commit
 .isaac/
