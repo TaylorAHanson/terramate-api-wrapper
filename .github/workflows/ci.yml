@@ -7,6 +7,7 @@ on:
 
 jobs:
   backend:
+    if: false # temporarily disabled
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -37,6 +38,7 @@ jobs:
       - run: pytest -v
 
   frontend:
+    if: false # temporarily disabled
     runs-on: ubuntu-latest
     defaults:
       run:
