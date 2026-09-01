@@ -1,9 +1,9 @@
 """Seam 1: drive real HTTP + a real test Lakebase, with only GitHubClient faked.
 
-No request/Step behavior exists yet (that's #18/#19), so these are wiring
-smoke tests: the endpoints respond, the reconcile loop's tick() is callable
-against a real database session, and the GitHubClient fake is a real
-substitution point future tests can assert against.
+These are wiring smoke tests: the endpoints respond, the reconcile loop's
+tick() is callable against a real database session (its actual request/Step
+behavior is exercised in test_reconcile_loop.py, #19), and the GitHubClient
+fake is a real substitution point future tests can assert against.
 """
 from __future__ import annotations
 

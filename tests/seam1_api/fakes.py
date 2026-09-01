@@ -43,3 +43,11 @@ class FakeGitHubClient(GitHubClient):
         merged = pr_number in self.merged_pr_numbers
         closed = merged or pr_number in self.closed_unmerged_pr_numbers
         return PullRequestStatus(merged=merged, closed=closed)
+
+    def get_plan(self, pr_number: int) -> str:
+        pr = self.opened_pull_requests[pr_number - 1]
+        return (
+            f"Terraform will perform the following actions:\n\n"
+            f"  # {pr.title}\n  + create\n\n"
+            f"Plan: 1 to add, 0 to change, 0 to destroy."
+        )
