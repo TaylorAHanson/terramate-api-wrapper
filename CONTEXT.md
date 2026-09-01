@@ -1,0 +1,106 @@
+# Context — terramate-api-wrapper
+
+A versioned abstraction API sitting between a self-service (agentic) application and
+the Terramate/Terraform codebase that actually provisions Databricks resources. The
+self-service side POSTs a small, stable request; the API encodes the "tribal knowledge"
+of editing/adding the Terramate catalyst bundle files on a branch, opening a pull
+request, and ordering those PRs correctly (passing outputs between them). Either
+neighbouring system can change without breaking the other.
+
+**The API never runs Terraform itself.** It opens PRs; the terramate repo's existing
+**GitHub Actions** run plan/apply, a human approves/merges the PR, and the API polls
+GitHub for results. Terraform execution and state are out of scope — they belong to the
+repo's CI. The API is a PR-orchestration + polling + output-capture engine.
+
+Physical shape: Databricks App (FastAPI + React), Lakebase (managed Postgres) for
+durable storage. No durable filesystem storage (bundle edits are made via the GitHub
+API / an ephemeral checkout, never persisted locally).
+
+## Glossary
+
+<!-- Glossary only. No implementation details, no decisions — those live in docs/adr/. -->
+
+### ProvisioningRequest
+The unit a client submits via `POST /v1/requests`. One high-level provisioning intent —
+"provision a workspace", "create a catalog" — carrying a resource **type** plus that
+type's parameters. There is **no common envelope**: the parameter set is entirely
+type-specific (a workspace's params differ from a schema's). Expands into exactly one
+Playbook. Ordering and value-passing are always *within* a single ProvisioningRequest (v1);
+cross-request dependencies are out of scope.
+
+### Type
+The kind of resource a ProvisioningRequest asks for — **`catalog`** (a Unity Catalog
+catalog) is itself just one type, alongside `workspace`, `schema`, `service_principal`, …
+The menu will eventually carry 50+ types; each type's parameter schema is published in the
+API's **OpenAPI spec** as a discriminated union on `type` (there is no separate `/types`
+endpoint). Each type is backed by a **Recipe** — not a declarative definition. (Considered
+and rejected for now: a data-driven registry; the per-type git operations vary too much to
+model declaratively. Simple first, not perfect.)
+
+### Recipe
+The per-type tribal knowledge, expressed imperatively **in code** (see `docs/adr/`): the
+specific, ordered git operations that realise one type — e.g. a workspace is "edit 2 yamls
+and add 2 yamls, in order"; a catalog is "find the right yaml, then edit it". A Recipe is a
+**generator** — a function `build(params) -> Playbook`, one per type, deployed with the app.
+It is *reusable and static*: the same `workspace` Recipe serves every workspace request.
+Running it against one request's params is what produces that request's Playbook.
+
+### Playbook
+The concrete, ordered DAG of Steps a **single** ProvisioningRequest expands into — the
+**instance** a Recipe produces for specific params, persisted in Lakebase. This is what the
+orchestrator executes and the state machine advances; the Recipe itself never enters the queue.
+One Recipe (per type) → many Playbooks (one per request); `Recipe : Playbook` is `function :
+its return value`. (Named "Playbook" rather than "Plan" to avoid collision with `terraform plan`.)
+
+### Step
+One node in a Playbook, realised as a **pull request** the API opens against the terramate
+repo. GitHub Actions runs plan/apply for it; a human approves and merges the PR (approval
+gate). The API waits for the Actions apply to finish, captures the Step's Outputs, then
+proceeds to the next Step. May depend on earlier Steps and consume their Outputs.
+
+### Bundle
+The set of Terramate catalyst bundle files (~4 yaml files) for one resource, edited or
+added in the cloned terramate repo. The concrete unit the API generates.
+
+### Output
+A value produced by an applied Step (e.g. an id emitted by terraform) that a later Step
+in the same Playbook consumes as an input. The reason ordering matters — distinct from values
+the API can mint up front (e.g. a UUID), which need no ordering; only these apply-derived
+Outputs force a later Step to wait for an earlier Step's apply. Captured by the Step's
+**GitHub Action writing the outputs directly into Lakebase via the Databricks SDK** (an agreed
+contract — see `docs/adr/0002-output-capture-via-direct-lakebase-write.md`); the API then reads
+them from Lakebase and never reads terraform state or parses the run log. Later Steps consume an
+Output by **reference**, not by copying its value around.
+
+### Version
+A `/vN` of the API, **selected by the client via the URL path**. Pins the way the API
+interacts with the Terramate bundles, so the self-service app, this API, and
+Terramate/Terraform can change asynchronously — when Terramate changes, a new version is
+cut over to while old versions keep working. (Open/fog: possible *version affinity* — a
+resource created under v1 stays pinned to v1 for later changes; tied to whether day-2
+modifications exist at all.)
+
+### Preflight check
+A validation attached to a Step that runs **before** the Step's PR is opened and can fail — or
+skip — the Step early: e.g. "is a CIDR range available?", "does this resource already exist, so
+skip creating it?" (possibly via Databricks SDK / MCP lookups). A **first-class property of a
+StepSpec** (defense decision), distinct from `terraform plan`, which runs later inside Actions.
+
+### Postflight check
+A validation attached to a Step that runs **after** its apply completes, to confirm the Step
+produced what was expected. Also a first-class StepSpec property. Paired concept with
+[[preflight-check]].
+
+### Asset identifier
+A deterministic, business/domain-encoded **UUIDv5** proposed as the durable, recreatable id for
+a provisioned asset across systems — distinct from the [[idempotency-key]]. Because it is
+derived from stable attributes (domain, business, logical info), the same asset resolves to the
+same id. *Open:* whether those inputs are always available up front. (Proposed at the defense;
+naming/domain definition tracked on the map.)
+
+### Idempotency-Key
+A client-supplied **UUIDv4** on `POST /vN/requests` that prevents an *exact* duplicate
+submission from creating a second ProvisioningRequest. It is about de-duplicating the *request*,
+not identifying the *asset* (that is the [[asset-identifier]]). "A similar request already
+exists" — fuzzy dedupe by domain/recency — is a separate concern pushed left to the self-service
+agent, not the API.
