@@ -16,6 +16,9 @@ dist/
 
 .DS_Store
 
+# Embedded Postgres data dir (./dev.sh — server/embedded_postgres.py)
+.pgdata/
+
 # dev.sh local run logs
 backend.log
 frontend.log

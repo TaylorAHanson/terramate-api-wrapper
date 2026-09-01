@@ -1,13 +1,15 @@
 #!/bin/bash
 
-# Local development launcher: checks the database in DATABASE_URL is reachable,
-# runs migrations, and starts the FastAPI backend (:8000) + Vite frontend
-# (:5173) together. In deployment these run as a single Databricks App process;
-# locally the Vite dev server proxies /v1 and /version to the backend (see
+# Local development launcher: provisions a Postgres, runs migrations, and
+# starts the FastAPI backend (:8000) + Vite frontend (:5173) together. In
+# deployment these run as a single Databricks App process; locally the Vite
+# dev server proxies /v1 and /version to the backend (see
 # frontend/vite.config.ts).
 #
-# You provide the Postgres (via .env's DATABASE_URL) — dev.sh does not provision
-# one, so it has no dependency on Docker or any specific database tool.
+# No Docker and no system-installed Postgres required: if DATABASE_URL is
+# unset, dev.sh boots a bundled embedded Postgres (server/embedded_postgres.py,
+# via the `pgserver` package) against a persistent, gitignored .pgdata/ dir.
+# Set DATABASE_URL yourself in .env to use your own Postgres instead.
 #
 # Usage: ./dev.sh [--debug]
 #   --debug   start the backend under debugpy on port 5678
@@ -24,6 +26,7 @@ NC='\033[0m'
 
 BACKEND_PORT=8000
 FRONTEND_PORT=5173
+PGDATA_DIR="$(pwd)/.pgdata"
 
 # Parse arguments
 DEBUG_MODE=false
@@ -86,6 +89,22 @@ if [ -f ".env" ]; then
     set +a
 fi
 
+# Picks the interpreter for a new venv. Prefers a version `pgserver` (the
+# embedded Postgres) publishes wheels for (3.9-3.12 as of this writing) —
+# without this, a machine whose default `python3` is newer (e.g. 3.13+) would
+# create a venv where embedded Postgres simply can't install, silently
+# defeating the "no Docker, no system Postgres" goal. Falls back to whatever
+# is on PATH if none of those are found.
+select_python() {
+    for candidate in python3.12 python3.11 python3.10 python3.9 python3 python; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Determine Python for the virtualenv (README convention: .venv at repo root).
 VENV_DIR=".venv"
 if [ -d "$VENV_DIR" ] && [ -x "$VENV_DIR/bin/python" ] && "$VENV_DIR/bin/python" --version >/dev/null 2>&1; then
@@ -93,23 +112,24 @@ if [ -d "$VENV_DIR" ] && [ -x "$VENV_DIR/bin/python" ] && "$VENV_DIR/bin/python"
 else
     echo -e "${YELLOW}No valid virtual environment found. Creating ${VENV_DIR}...${NC}"
     rm -rf "$VENV_DIR"
-    if command -v python3 >/dev/null 2>&1; then
-        python3 -m venv "$VENV_DIR"
-    else
-        python -m venv "$VENV_DIR"
+    PYTHON_FOR_VENV="$(select_python)"
+    if [ -z "$PYTHON_FOR_VENV" ]; then
+        echo -e "${RED}✗ No Python interpreter found on PATH${NC}"
+        exit 1
     fi
+    "$PYTHON_FOR_VENV" -m venv "$VENV_DIR"
     if [ ! -x "$VENV_DIR/bin/python" ]; then
         echo -e "${RED}✗ Failed to create virtual environment${NC}"
         exit 1
     fi
-    echo -e "${GREEN}✓ Virtual environment created${NC}"
+    echo -e "${GREEN}✓ Virtual environment created (using ${PYTHON_FOR_VENV})${NC}"
 fi
 PYTHON="$VENV_DIR/bin/python"
 
 # Verify key deps; install from requirements-dev.txt if anything is missing.
 echo -e "${CYAN}Checking Python dependencies...${NC}"
 MISSING=()
-for mod in uvicorn fastapi sqlalchemy alembic psycopg2 httpx; do
+for mod in uvicorn fastapi sqlalchemy alembic psycopg2 httpx pgserver; do
     "$PYTHON" -c "import $mod" 2>/dev/null || MISSING+=("$mod")
 done
 if [ "$DEBUG_MODE" = true ]; then
@@ -148,18 +168,27 @@ PY
 }
 
 # The app needs a reachable Postgres (DATABASE_URL). In a deployed app the
-# Lakebase resource provides it; locally, point DATABASE_URL at whatever
-# Postgres you run (a native install, a managed instance, or a container).
-# dev.sh intentionally does NOT provision a database — it only checks the one
-# you've configured is up, so there's no hard dependency on any single tool.
+# Lakebase resource provides it. Locally, if you haven't set DATABASE_URL
+# yourself, boot the bundled embedded Postgres (no Docker, no system install)
+# against a persistent data dir so it survives ./dev.sh restarts.
+if [ -z "$DATABASE_URL" ]; then
+    echo -e "${CYAN}No DATABASE_URL set — starting embedded Postgres (${PGDATA_DIR})...${NC}"
+    EMBEDDED_DATABASE_URL=$("$PYTHON" -m server.embedded_postgres --pgdata "$PGDATA_DIR")
+    if [ $? -ne 0 ] || [ -z "$EMBEDDED_DATABASE_URL" ]; then
+        echo -e "${RED}✗ Failed to start the embedded Postgres.${NC}"
+        exit 1
+    fi
+    export DATABASE_URL="$EMBEDDED_DATABASE_URL"
+    echo -e "${GREEN}✓ Embedded Postgres ready${NC}\n"
+fi
+
 echo -e "${CYAN}Checking database connectivity...${NC}"
 if db_reachable; then
     echo -e "${GREEN}✓ Database reachable${NC}"
 else
     echo -e "${RED}✗ Cannot reach a Postgres at DATABASE_URL:${NC}"
     echo -e "    ${BLUE}${DATABASE_URL:-(unset)}${NC}"
-    echo -e "${YELLOW}  Start a Postgres and set DATABASE_URL in .env, then re-run ./dev.sh.${NC}"
-    echo -e "${YELLOW}  See README.md → \"Local development\" for a ready-to-paste setup.${NC}"
+    echo -e "${YELLOW}  You set DATABASE_URL yourself — confirm that Postgres is running and reachable, then re-run ./dev.sh.${NC}"
     exit 1
 fi
 
