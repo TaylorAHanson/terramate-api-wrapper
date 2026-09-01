@@ -27,7 +27,7 @@ built before we have seen enough real recipes to know its shape.
 ## Decision
 
 Back each type with an **imperative Recipe in code** — a per-type unit that knows the
-specific, ordered git operations for that type and yields the Plan of ordered Steps.
+specific, ordered git operations for that type and yields the Playbook of ordered Steps.
 There is a shared Recipe *interface*, but the body of each Recipe is ordinary code, not a
 declarative definition. We optimise for **simple first, not perfect**.
 

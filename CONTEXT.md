@@ -25,7 +25,7 @@ The unit a client submits via `POST /v1/requests`. One high-level provisioning i
 "provision a workspace", "create a catalog" — carrying a resource **type** plus that
 type's parameters. There is **no common envelope**: the parameter set is entirely
 type-specific (a workspace's params differ from a schema's). Expands into exactly one
-Plan. Ordering and value-passing are always *within* a single ProvisioningRequest (v1);
+Playbook. Ordering and value-passing are always *within* a single ProvisioningRequest (v1);
 cross-request dependencies are out of scope.
 
 ### Type
@@ -38,17 +38,22 @@ and rejected for now: a data-driven registry; the per-type git operations vary t
 model declaratively. Simple first, not perfect.)
 
 ### Recipe
-The per-type tribal knowledge, expressed imperatively in code: the specific, ordered git
-operations that realise one type in the cloned terramate repo — e.g. a workspace is "edit
-2 yamls and add 2 yamls, in order"; a catalog is "find the right yaml, then edit it".
-A Recipe both mutates the bundle files and yields the Plan of ordered Steps to run.
+The per-type tribal knowledge, expressed imperatively **in code** (see `docs/adr/`): the
+specific, ordered git operations that realise one type — e.g. a workspace is "edit 2 yamls
+and add 2 yamls, in order"; a catalog is "find the right yaml, then edit it". A Recipe is a
+**generator** — a function `build(params) -> Playbook`, one per type, deployed with the app.
+It is *reusable and static*: the same `workspace` Recipe serves every workspace request.
+Running it against one request's params is what produces that request's Playbook.
 
-### Plan
-The ordered DAG of Steps a ProvisioningRequest expands into. (Distinct from a Terraform "plan"
-— when the Terraform sense is meant, say "terraform plan".)
+### Playbook
+The concrete, ordered DAG of Steps a **single** ProvisioningRequest expands into — the
+**instance** a Recipe produces for specific params, persisted in Lakebase. This is what the
+orchestrator executes and the state machine advances; the Recipe itself never enters the queue.
+One Recipe (per type) → many Playbooks (one per request); `Recipe : Playbook` is `function :
+its return value`. (Named "Playbook" rather than "Plan" to avoid collision with `terraform plan`.)
 
 ### Step
-One node in a Plan, realised as a **pull request** the API opens against the terramate
+One node in a Playbook, realised as a **pull request** the API opens against the terramate
 repo. GitHub Actions runs plan/apply for it; a human approves and merges the PR (approval
 gate). The API waits for the Actions apply to finish, captures the Step's Outputs, then
 proceeds to the next Step. May depend on earlier Steps and consume their Outputs.
@@ -59,7 +64,9 @@ added in the cloned terramate repo. The concrete unit the API generates.
 
 ### Output
 A value produced by an applied Step (e.g. an id emitted by terraform) that a later Step
-in the same Plan consumes as an input. The reason ordering matters. Captured by the API
+in the same Playbook consumes as an input. The reason ordering matters — distinct from values
+the API can mint up front (e.g. a UUID), which need no ordering; only these apply-derived
+Outputs force a later Step to wait for an earlier Step's apply. Captured by the API
 by **pulling** it from the Step's Actions run (a structured check-run output / PR comment
 in an agreed contract), since the API never reads terraform state directly. Requires the
 terramate repo's Actions to emit outputs in that contract.
