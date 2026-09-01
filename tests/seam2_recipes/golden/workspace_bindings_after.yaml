@@ -1,0 +1,4 @@
+metastore: main
+bindings:
+  - workspace_id: "${steps.create.outputs.workspace_id}"
+    groups: ["data-eng", "platform"]

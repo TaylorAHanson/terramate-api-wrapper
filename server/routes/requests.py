@@ -1,20 +1,23 @@
 """`POST /v1/requests`, `GET /v1/requests/{id}`, and
 `GET /v1/requests/{id}/steps/{n}/plan` (architecture.md §5, §11).
 
-`POST` validates the body against the type's Pydantic model (published in
-`/openapi.json`), dedupes on `Idempotency-Key`, persists the
-ProvisioningRequest, and expands its type's Recipe into a persisted
-single-Step Playbook. The reconcile loop (`server.orchestrator`) then claims
-and advances that Playbook's Steps; the `/plan` route just reads back the
+`POST` validates the body against its type's discriminated-union member
+(published in `/openapi.json`), dedupes on `Idempotency-Key`, persists the
+ProvisioningRequest, and expands its type's Recipe into a persisted Playbook
+of one or more Steps — translating each StepSpec's `depends_on` (Step *keys*)
+into the Step *row ids* generated here, since those ids don't exist until
+insert time. The reconcile loop (`server.orchestrator`) then claims and
+advances that Playbook's Steps; the `/plan` route just reads back the
 `terraform plan` the loop captured once a Step has one.
 """
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Annotated, Union
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -23,8 +26,14 @@ from server.database import get_db
 from server.models import ProvisioningRequest, Step
 from server.recipes.registry import RECIPES
 from server.recipes.schema import SchemaProvisioningRequest
+from server.recipes.workspace import WorkspaceProvisioningRequest
 
 router = APIRouter()
+
+ProvisioningRequestBody = Annotated[
+    Union[SchemaProvisioningRequest, WorkspaceProvisioningRequest],
+    Field(discriminator="type"),
+]
 
 # Pins how this route interacts with the Terramate bundles (architecture.md
 # §7); hardcoded until a second version exists to select between.
@@ -91,7 +100,7 @@ def _find_by_idempotency_key(session: Session, idempotency_key: str) -> Provisio
 
 @router.post("/v1/requests", response_model=CreateRequestResponse, status_code=202)
 def create_request(
-    body: SchemaProvisioningRequest,
+    body: ProvisioningRequestBody,
     idempotency_key: str = Header(alias="Idempotency-Key"),
     # The self-service caller's identity, recorded for audit (architecture.md
     # §10). A placeholder until real M2M auth context is wired up (fog).
@@ -116,15 +125,26 @@ def create_request(
     )
     session.add(request_row)
 
+    # depends_on is authored against Step *keys* (StepSpec.depends_on) but
+    # persisted as Step *row ids* (server.orchestrator._dependencies_applied
+    # queries by id) — so ids are minted for every Step up front, in a
+    # separate pass, before any Step row referencing another is built.
+    step_ids_by_key = {step_spec.key: str(uuid.uuid4()) for step_spec in playbook.steps}
+
     for ordinal, step_spec in enumerate(playbook.steps):
         session.add(
             Step(
-                id=str(uuid.uuid4()),
+                id=step_ids_by_key[step_spec.key],
                 request_id=request_row.id,
                 ordinal=ordinal,
                 key=step_spec.key,
                 status="queued",
-                depends_on=list(step_spec.depends_on),
+                depends_on=[step_ids_by_key[key] for key in step_spec.depends_on],
+                produces=list(step_spec.produces),
+                consumes=[
+                    {"step_key": ref.step_key, "output_name": ref.output_name}
+                    for ref in step_spec.consumes
+                ],
             )
         )
 

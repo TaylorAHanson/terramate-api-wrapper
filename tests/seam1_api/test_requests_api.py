@@ -73,6 +73,15 @@ def test_unknown_type_is_rejected_synchronously():
     response = client.post(
         "/v1/requests",
         headers=_headers(_idempotency_key()),
+        json={"type": "does-not-exist", "params": {}},
+    )
+    assert response.status_code == 422
+
+
+def test_workspace_params_missing_required_fields_are_rejected_synchronously():
+    response = client.post(
+        "/v1/requests",
+        headers=_headers(_idempotency_key()),
         json={"type": "workspace", "params": {}},
     )
     assert response.status_code == 422
