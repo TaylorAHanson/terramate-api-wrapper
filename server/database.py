@@ -17,7 +17,7 @@ import uuid
 from typing import Any
 
 from sqlalchemy import create_engine
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session
 
 from server.config import get_settings
@@ -46,10 +46,18 @@ def _connect() -> Any:
 
     settings = get_settings()
     if settings.database_url:
-        # psycopg2 speaks libpq URIs (postgresql://), not SQLAlchemy's driver-
-        # qualified postgresql+psycopg2:// scheme.
-        dsn = settings.database_url.replace("postgresql+psycopg2://", "postgresql://")
-        return psycopg2.connect(dsn)
+        # psycopg2 doesn't understand SQLAlchemy's driver-qualified
+        # postgresql+psycopg2:// scheme, so parse with SQLAlchemy (which
+        # handles percent-encoded credentials correctly) and connect with the
+        # decoded components rather than string-munging the URL.
+        url = make_url(settings.database_url)
+        return psycopg2.connect(
+            host=url.host,
+            port=url.port,
+            dbname=url.database,
+            user=url.username,
+            password=url.password,
+        )
 
     if not settings.lakebase_instance_name:
         raise RuntimeError(

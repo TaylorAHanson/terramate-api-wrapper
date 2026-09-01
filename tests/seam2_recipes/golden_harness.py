@@ -18,6 +18,11 @@ def _file_edit_to_dict(edit: FileEdit) -> dict:
     if isinstance(edit, AddFile):
         return {"type": "add_file", "path": edit.path, "content": edit.content}
     if isinstance(edit, EditFile):
+        # `patch` is a callable (parse -> mutate -> serialize), not data, so it
+        # can't go in a golden file as-is. A real EditFile-using recipe's own
+        # golden case should apply its patch to a fixture "before" file and
+        # assert the "after" content directly, rather than via this generic
+        # serializer.
         return {"type": "edit_file", "path": edit.path}
     raise TypeError(f"Unknown FileEdit type: {type(edit)!r}")
 

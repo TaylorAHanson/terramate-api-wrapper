@@ -21,8 +21,14 @@ class OpenedPullRequest:
 
 @dataclass
 class FakeGitHubClient(GitHubClient):
+    """Merged and closed-unmerged ("rejected", architecture.md §6) are tracked
+    as separate sets rather than one flag, since a test needs to simulate
+    both outcomes independently.
+    """
+
     opened_pull_requests: list[OpenedPullRequest] = field(default_factory=list)
     merged_pr_numbers: set[int] = field(default_factory=set)
+    closed_unmerged_pr_numbers: set[int] = field(default_factory=set)
 
     def open_pull_request(
         self, *, branch_name: str, base_branch: str, title: str, body: str
@@ -35,4 +41,5 @@ class FakeGitHubClient(GitHubClient):
 
     def get_pull_request_status(self, pr_number: int) -> PullRequestStatus:
         merged = pr_number in self.merged_pr_numbers
-        return PullRequestStatus(merged=merged, closed=merged)
+        closed = merged or pr_number in self.closed_unmerged_pr_numbers
+        return PullRequestStatus(merged=merged, closed=closed)

@@ -46,3 +46,14 @@ def test_fake_github_client_records_opened_pull_requests():
     assert len(fake.opened_pull_requests) == 1
     assert fake.opened_pull_requests[0].branch_name == "provision/demo"
     assert fake.get_pull_request_status(ref.number).merged is False
+
+
+def test_fake_github_client_can_simulate_a_rejected_pr():
+    fake = FakeGitHubClient()
+    ref = fake.open_pull_request(branch_name="provision/demo", base_branch="main", title="t", body="b")
+
+    fake.closed_unmerged_pr_numbers.add(ref.number)
+
+    status = fake.get_pull_request_status(ref.number)
+    assert status.closed is True
+    assert status.merged is False
