@@ -80,6 +80,48 @@ ordering and a queue. Everything below is machinery in service of it.
   **pre-flight validation** to catch failures before execution.
 - Not the self-service application itself, and not a redesign of the Terramate repo.
 
+### 3.1 MVP scope line (v1 build)
+
+The v1 build is **phased** (decision recorded closing the map's "Define the MVP scope
+line", #9): the **type-agnostic engine** is built to the finish line *now* against a
+controlled fixture, and **real-type recipes follow** once the airgap dissolves (bundle
+examples [#2](https://github.com/TaylorAHanson/terramate-api-wrapper/issues/2) + sandbox /
+GitHub access [#15](https://github.com/TaylorAHanson/terramate-api-wrapper/issues/15)).
+
+**Sorting rule:** a candidate is in the build-now tranche only if it can be finished now
+*without* the real terramate repo or concrete recipes **and** including it adds no friction
+to the later recipe work. Otherwise it is deferred — and where deferral is cheap to reverse,
+a **seam** (a column, a hook) is reserved now so it lands later as a no-op, not a migration.
+
+**Phase 1 — now, against fixtures.** The full engine: `POST /v1/requests` + `Idempotency-Key`
++ OpenAPI type schemas (§11); Recipe framework + serial one-PR-per-Step reconcile loop + the
+§6 state machine + halt-no-rollback; GitHub client; Lakebase repository (§9); the ADR-0002
+output write (our half); the preflight/postflight **framework** (hook points only, not the
+concrete checks); the global **off-switch** (simple intake-gate + drain); a **thin read-only
+status UI** (submit, watch status, read the `terraform plan`); and a **dry-run/preview
+capability** (render diff + Playbook, internal). Proven end-to-end against a **real throwaway
+GitHub fixture repo** with toy Actions (a `null_resource`/`local_file` that emits an output →
+Lakebase), with **`workspace` + `schema`** fixture recipes covering both Playbook shapes and a
+**golden-file harness** on top.
+
+**Phase 2 — when #2 + #15 land.** Real-repo recipes per type (the tribal knowledge, the long
+pole — [#5](https://github.com/TaylorAHanson/terramate-api-wrapper/issues/5) /
+[#7](https://github.com/TaylorAHanson/terramate-api-wrapper/issues/7)); the concrete
+preflight/postflight checks ([#13](https://github.com/TaylorAHanson/terramate-api-wrapper/issues/13));
+wiring ADR-0002 to the real repo CI and agreeing the row shape
+([#6](https://github.com/TaylorAHanson/terramate-api-wrapper/issues/6)); and cutover from the
+fixture repo to the sandbox/real terramate repo.
+
+**Reserved seams.** A `step` lock/claim column for the locking model
+([#10](https://github.com/TaylorAHanson/terramate-api-wrapper/issues/10)); a nullable
+`provisioning_request.asset_id` for the UUIDv5 business identity
+([#12](https://github.com/TaylorAHanson/terramate-api-wrapper/issues/12)). See §9.
+
+**Deferred / out of MVP.** Locking model (#10) and UUIDv5 identity (#12) — seams only;
+change-management comms ([#14](https://github.com/TaylorAHanson/terramate-api-wrapper/issues/14),
+an out-of-band people-process); sandbox-only mode / `20X`-delay semantics (#11 elaboration);
+a public `/dry-run` endpoint; plus everything already listed as fog/upgrades in §16.
+
 ---
 
 ## 4. Logical architecture
@@ -311,9 +353,12 @@ flowchart LR
 Indicative v1 schema — the authoritative design is tracked on the wayfinder map.
 
 - **provisioning_request** — `id`, `type`, `params` (jsonb), `version`, `requester`,
-  `idempotency_key` (unique), `status`, timestamps.
+  `idempotency_key` (unique), `status`, timestamps. **`asset_id` (nullable)** — reserved seam
+  for the business **UUIDv5** asset identity (#12); unused in MVP, filled in when #12's
+  encoding inputs are pinned (see §3.1).
 - **step** — `id`, `request_id`, `ordinal`, `status`, `pr_number`, `pr_url`,
-  `plan_ref`, `depends_on` (step ids), timestamps.
+  `plan_ref`, `depends_on` (step ids), timestamps. **`lock` / claim column (nullable)** —
+  reserved seam for the locking model (#10); unused in MVP (see §3.1).
 - **output** — `id`, `step_id`, `key`, `value`, captured-at. **Written directly by the Step's
   GitHub Action via the Databricks SDK** (ADR-0002), then referenced by later Steps. (SCD2
   history under consideration — see #6.)
