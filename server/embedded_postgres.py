@@ -21,16 +21,21 @@ from pathlib import Path
 DEFAULT_DATABASE_NAME = "terramate_dev"
 
 
-def ensure_embedded_postgres(pgdata_dir: Path, database: str = DEFAULT_DATABASE_NAME) -> str:
+def ensure_embedded_postgres(
+    pgdata_dir: Path,
+    database: str = DEFAULT_DATABASE_NAME,
+    cleanup_mode: str | None = None,
+) -> str:
     """Start (or reattach to) the embedded Postgres in `pgdata_dir`, creating
     `database` if needed, and return a DATABASE_URL for it.
 
     Idempotent and safe to call on every `./dev.sh` run: `pgserver.get_server`
     reattaches to an already-running server for the same data dir rather than
-    re-initializing it, and `cleanup_mode=None` leaves the server (a detached
-    `pg_ctl` daemon, not a child of this process) running once this process
-    exits — so both the data and the running server survive a `./dev.sh`
-    restart.
+    re-initializing it. `cleanup_mode=None` (dev.sh's default) leaves the
+    server (a detached `pg_ctl` daemon, not a child of this process) running
+    once this process exits, so both the data and the running server survive
+    a `./dev.sh` restart. Tests pass `cleanup_mode="delete"` instead, to stop
+    the server and remove `pgdata_dir` once done.
     """
     import pgserver
     import psycopg2
@@ -38,9 +43,11 @@ def ensure_embedded_postgres(pgdata_dir: Path, database: str = DEFAULT_DATABASE_
     from sqlalchemy.engine import make_url
 
     pgdata_dir.mkdir(parents=True, exist_ok=True)
-    server = pgserver.get_server(pgdata_dir, cleanup_mode=None)
+    server = pgserver.get_server(pgdata_dir, cleanup_mode=cleanup_mode)
 
     admin_url = make_url(server.get_uri())
+    # initdb is run with --auth=trust (local dev only, on a data dir no one
+    # else can reach), so connecting as `postgres` needs no password.
     conn = psycopg2.connect(
         host=admin_url.host or admin_url.query.get("host"),
         port=admin_url.port,
