@@ -1,0 +1,86 @@
+bundle:
+  name: terramate-api-wrapper
+  databricks_cli_version: ">=0.283.0"
+
+# Prerequisite (out-of-band, not managed by this bundle): a secret scope
+# holding the GitHub service-account PAT, created once per workspace with
+#   databricks secrets create-scope ${var.secret_scope}
+#   databricks secrets put-secret ${var.secret_scope} github-pat
+# Secret *values* never belong in a bundle — only the app's read access to an
+# already-populated scope does (architecture.md §10).
+
+resources:
+  database_instances:
+    provisioning_db:
+      name: "terramate-provisioning-${var.environment}-v1"
+      enable_pg_native_login: true
+      capacity: "CU_1"
+      lifecycle:
+        prevent_destroy: true
+      permissions:
+        # Authoritative ACL — re-grants the deploying user MANAGE, which an
+        # unqualified `permissions:` block would otherwise strip on apply.
+        - level: CAN_MANAGE
+          user_name: "${workspace.current_user.userName}"
+        - level: CAN_USE
+          service_principal_name: ${resources.apps.terramate-api-wrapper.service_principal_client_id}
+
+  apps:
+    terramate-api-wrapper:
+      name: ${var.app_name}
+      description: "Terramate provisioning abstraction API (${var.environment})"
+      source_code_path: "."
+      resources:
+        # Autoscaling attach (`postgres:`), not the Provisioned `database:`
+        # type — every instance created via `database_instances` is now an
+        # Autoscaling project, and attaching it as `database:` fails MANAGE
+        # validation even with Can Manage on the project.
+        - name: postgres
+          postgres:
+            branch: projects/${resources.database_instances.provisioning_db.name}/branches/production
+            database: projects/${resources.database_instances.provisioning_db.name}/branches/production/databases/databricks-postgres
+            permission: CAN_CONNECT_AND_CREATE
+        - name: github-pat
+          secret:
+            scope: ${var.secret_scope}
+            key: github-pat
+            permission: READ
+      config:
+        command:
+          - uvicorn
+          - server.main:app
+          - --host
+          - 0.0.0.0
+          - --port
+          - "8000"
+        env:
+          - name: APP_ENVIRONMENT
+            value: "${var.environment}"
+          - name: LAKEBASE_INSTANCE_NAME
+            value: "${resources.database_instances.provisioning_db.name}"
+          - name: GITHUB_PAT
+            valueFrom: github-pat
+
+variables:
+  app_name:
+    description: "Application name"
+    default: "terramate-api-wrapper"
+  environment:
+    description: "Deployment target (dev/stage/prod)"
+    default: "dev"
+  secret_scope:
+    description: "Databricks secret scope holding the GitHub service-account PAT"
+    default: "terramate-api-wrapper"
+
+targets:
+  dev:
+    mode: development
+    default: true
+    variables:
+      environment: "dev"
+      app_name: "terramate-api-wrapper-dev"
+  prod:
+    mode: production
+    variables:
+      environment: "prod"
+      app_name: "terramate-api-wrapper"
