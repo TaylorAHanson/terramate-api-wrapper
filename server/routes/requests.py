@@ -1,9 +1,12 @@
-"""`POST /v1/requests` + `GET /v1/requests/{id}` (architecture.md §5, §11).
+"""`POST /v1/requests`, `GET /v1/requests/{id}`, and
+`GET /v1/requests/{id}/steps/{n}/plan` (architecture.md §5, §11).
 
 `POST` validates the body against the type's Pydantic model (published in
 `/openapi.json`), dedupes on `Idempotency-Key`, persists the
 ProvisioningRequest, and expands its type's Recipe into a persisted
-single-Step Playbook — all before any PR is opened (that lands in #19+).
+single-Step Playbook. The reconcile loop (`server.orchestrator`) then claims
+and advances that Playbook's Steps; the `/plan` route just reads back the
+`terraform plan` the loop captured once a Step has one.
 """
 from __future__ import annotations
 
@@ -144,3 +147,24 @@ def get_request(request_id: str, session: Session = Depends(get_db)) -> RequestD
     if request_row is None:
         raise HTTPException(status_code=404, detail="Request not found")
     return _to_response(request_row)
+
+
+class StepPlanResponse(BaseModel):
+    ordinal: int
+    key: str
+    status: str
+    plan: str
+
+
+@router.get("/v1/requests/{request_id}/steps/{ordinal}/plan", response_model=StepPlanResponse)
+def get_step_plan(
+    request_id: str, ordinal: int, session: Session = Depends(get_db)
+) -> StepPlanResponse:
+    step = session.scalars(
+        select(Step).where(Step.request_id == request_id, Step.ordinal == ordinal)
+    ).first()
+    if step is None:
+        raise HTTPException(status_code=404, detail="Step not found")
+    if step.plan_ref is None:
+        raise HTTPException(status_code=409, detail="Plan not available yet")
+    return StepPlanResponse(ordinal=step.ordinal, key=step.key, status=step.status, plan=step.plan_ref)
