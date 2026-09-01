@@ -1,0 +1,47 @@
+"""Environment configuration.
+
+Every value here is read from an env var, never from a file on disk — in a
+deployed Databricks App these are injected by the platform (either directly,
+or `valueFrom` a secret-scope-backed app resource; see databricks.yml and
+architecture.md §10). No caching: reading `os.environ` is cheap, and caching
+would make env-var overrides in tests (monkeypatch) silently stale.
+"""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Settings:
+    app_environment: str
+    github_pat: str | None
+
+    # Local/dev/test override: a full SQLAlchemy connection string to a plain
+    # Postgres instance. When set, `server.database` skips the Lakebase OAuth
+    # credential flow entirely. This is how tests point at a real test
+    # Lakebase-compatible Postgres (Seam 1) instead of the managed service.
+    database_url: str | None
+
+    # The production (Databricks App) path: PGHOST/PGPORT/PGDATABASE/PGUSER are
+    # injected by the app's `postgres` resource attachment; LAKEBASE_INSTANCE_NAME
+    # is set explicitly in databricks.yml so the app knows which instance to mint
+    # an OAuth credential for.
+    pg_host: str | None
+    pg_port: str | None
+    pg_database: str | None
+    pg_user: str | None
+    lakebase_instance_name: str | None
+
+
+def get_settings() -> Settings:
+    return Settings(
+        app_environment=os.environ.get("APP_ENVIRONMENT", "local"),
+        github_pat=os.environ.get("GITHUB_PAT") or None,
+        database_url=os.environ.get("DATABASE_URL") or None,
+        pg_host=os.environ.get("PGHOST"),
+        pg_port=os.environ.get("PGPORT"),
+        pg_database=os.environ.get("PGDATABASE"),
+        pg_user=os.environ.get("PGUSER"),
+        lakebase_instance_name=os.environ.get("LAKEBASE_INSTANCE_NAME"),
+    )

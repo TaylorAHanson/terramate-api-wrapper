@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+databricks-sdk>=0.56.0
+sqlalchemy>=2.0
+psycopg2-binary
+alembic
+httpx

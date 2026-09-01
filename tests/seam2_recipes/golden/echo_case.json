@@ -1,0 +1,17 @@
+{
+  "steps": [
+    {
+      "bundle_edits": [
+        {
+          "content": "name: demo\n",
+          "path": "stacks/echo/demo.yaml",
+          "type": "add_file"
+        }
+      ],
+      "consumes": [],
+      "depends_on": [],
+      "key": "echo",
+      "produces": []
+    }
+  ]
+}
