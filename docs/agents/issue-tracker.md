@@ -13,26 +13,25 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 
 Infer the repo from `git remote -v` — `gh` does this automatically when run inside a clone.
 
-## Blocking edges — inline prose ONLY (repo override)
+## Blocking edges — native GitHub dependencies ONLY
 
-**This repo does NOT use GitHub's native issue dependencies. Do not create them.**
+**Always express blocking with GitHub's native issue dependencies. Never use a prose
+`Blocked by:` line.** Native dependencies are the canonical, UI-visible, frontier-gating
+representation that `/wayfinder` and tally-ho actually read.
 
-This deliberately overrides the default wayfinder/tally-ho convention (which uses
-native issue dependencies as the canonical, frontier-gating representation). In
-this repo, blocking is expressed **only** as a prose line at the top or bottom of
-the child issue's body:
+Add an edge (child is blocked by blocker):
 
 ```
-Blocked by: #<n>, #<n>
+# resolve the BLOCKER's numeric database id (NOT the #number, NOT the node_id):
+blocker_id=$(gh api repos/<owner>/<repo>/issues/<blocker-number> --jq .id)
+gh api --method POST repos/<owner>/<repo>/issues/<child-number>/dependencies/blocked_by \
+  -F issue_id="$blocker_id"
 ```
 
-- Never call the `dependencies/blocked_by` API or add a native dependency edge for any reason.
-- Never suggest adding one as an "improvement."
-- Consequence, understood and accepted: the automated frontier query does **not**
-  read this prose, so it will **not** stop a blocked ticket from being claimed or
-  spawned. Ordering is gated **manually** — a human decides when to spawn/land a
-  ticket whose blockers aren't yet merged. The prose line documents intent for
-  humans and agents reading the issue; it is not an automated gate.
+- GitHub reports open blockers via `issue_dependencies_summary.blocked_by` — that count is the live gate.
+- A ticket is unblocked when every blocker is **closed**.
+- The frontier query drops any issue with `issue_dependencies_summary.blocked_by > 0` (or an assignee); first in map order wins.
+- Do **not** add a prose `Blocked by:` line. If you find one on an existing issue, replace it with a native dependency.
 
 ## Labels
 
@@ -41,7 +40,7 @@ Other `wayfinder:*` labels (`map`, `grilling`, `prototype`, `research`) mark non
 
 ## When a skill says "publish to the issue tracker"
 
-Create a GitHub issue, and express any blocking edge as the inline `Blocked by:` prose above.
+Create a GitHub issue, and express any blocking edge as a native `blocked_by` dependency (above).
 
 ## When a skill says "fetch the relevant ticket"
 
