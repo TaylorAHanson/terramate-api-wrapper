@@ -72,6 +72,16 @@ class Step(Base):
     request: Mapped["ProvisioningRequest"] = relationship(back_populates="steps")
 
 
+class IntakeGate(Base):
+    """The global off-switch (#21) — a single seeded row, `id == 1`."""
+
+    __tablename__ = "intake_gate"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    enabled: Mapped[bool]
+    updated_at: Mapped[datetime] = _server_now()
+
+
 class Output(Base):
     __tablename__ = "output"
     __table_args__ = (UniqueConstraint("step_id", "key", name="uq_output_step_key"),)

@@ -1,9 +1,21 @@
 import { useEffect, useState } from "react";
-import { getBuildInfo, getRequest, getStepPlan, type BuildInfo, type RequestDetail, type Step } from "./api";
+import {
+  cancelRequest,
+  getBuildInfo,
+  getIntakeGate,
+  getRequest,
+  getStepPlan,
+  setIntakeGate,
+  type BuildInfo,
+  type IntakeGate,
+  type RequestDetail,
+  type Step,
+} from "./api";
 
-// The thin read-only status UI (architecture.md §11/§15.2): paste a
-// request_id, see its status and Steps (including awaiting_approval), and
-// read a Step's terraform plan once it has one (#19).
+// The status + operator-controls UI (architecture.md §11/§15.2): paste a
+// request_id, see its status and Steps (including awaiting_approval), read a
+// Step's terraform plan once it has one (#19), cancel an in-flight request,
+// and flip the global intake off-switch (#21).
 export default function App() {
   const [buildInfo, setBuildInfo] = useState<BuildInfo | null>(null);
   const [buildError, setBuildError] = useState<string | null>(null);
@@ -22,8 +34,48 @@ export default function App() {
           Connected to API version {buildInfo.version} ({buildInfo.git_sha})
         </p>
       )}
+      <IntakeGateControl />
       <RequestLookup />
     </main>
+  );
+}
+
+const TERMINAL_REQUEST_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
+
+function IntakeGateControl() {
+  const [gate, setGate] = useState<IntakeGate | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = () => {
+    getIntakeGate()
+      .then(setGate)
+      .catch((err: Error) => setError(err.message));
+  };
+
+  useEffect(load, []);
+
+  const toggle = () => {
+    if (!gate) return;
+    setError(null);
+    setIntakeGate(!gate.enabled)
+      .then(setGate)
+      .catch((err: Error) => setError(err.message));
+  };
+
+  return (
+    <section>
+      <h2>Intake</h2>
+      {error && <p role="alert">{error}</p>}
+      {gate && (
+        <p>
+          New requests are currently <strong>{gate.enabled ? "open" : "closed"}</strong>
+          {" — "}
+          <button type="button" onClick={toggle}>
+            {gate.enabled ? "Close intake" : "Open intake"}
+          </button>
+        </p>
+      )}
+    </section>
   );
 }
 
@@ -63,17 +115,34 @@ function RequestLookup() {
         <button type="submit">Load</button>
       </form>
       {error && <p role="alert">{error}</p>}
-      {request && <RequestView request={request} />}
+      {request && <RequestView request={request} onChanged={() => load(request.id)} />}
     </section>
   );
 }
 
-function RequestView({ request }: { request: RequestDetail }) {
+function RequestView({ request, onChanged }: { request: RequestDetail; onChanged: () => void }) {
+  const [cancelError, setCancelError] = useState<string | null>(null);
+  const cancellable = !TERMINAL_REQUEST_STATUSES.has(request.status);
+
+  const cancel = () => {
+    setCancelError(null);
+    cancelRequest(request.id).then(onChanged).catch((err: Error) => setCancelError(err.message));
+  };
+
   return (
     <div>
       <p>
         <strong>{request.type}</strong> — status: <code>{request.status}</code>
+        {cancellable && (
+          <>
+            {" "}
+            <button type="button" onClick={cancel}>
+              Cancel request
+            </button>
+          </>
+        )}
       </p>
+      {cancelError && <p role="alert">{cancelError}</p>}
       <p>
         Requester: {request.requester} · Version: {request.version}
       </p>

@@ -37,6 +37,12 @@ from server.models import Output, ProvisioningRequest, Step
 
 _FAILED_STEP_STATUSES = {"plan_failed", "apply_failed", "rejected"}
 
+# A request halted here (failed, by a Step; cancelled, by an operator) never
+# resumes (architecture.md §6, "halt-no-rollback") — none of its Steps are
+# claimed or advanced further, even a queued Step with no dependency relation
+# to whatever halted the request (#21).
+TERMINAL_REQUEST_STATUSES = {"succeeded", "failed", "cancelled"}
+
 
 def tick(session: Session, github_client: GitHubClient) -> None:
     """Advance every in-flight Step by one reconciliation pass."""
@@ -62,7 +68,14 @@ def _claim_and_open_next(session: Session, github_client: GitHubClient) -> bool:
         .with_for_update(skip_locked=True)
     ).all()
 
-    step = next((s for s in queued_steps if _dependencies_applied(session, s)), None)
+    step = next(
+        (
+            s
+            for s in queued_steps
+            if s.request.status not in TERMINAL_REQUEST_STATUSES and _dependencies_applied(session, s)
+        ),
+        None,
+    )
     if step is None:
         return False
 
@@ -137,6 +150,8 @@ def _produced_outputs_present(session: Session, step: Step) -> bool:
 def _advance_awaiting_approval(session: Session, github_client: GitHubClient) -> None:
     steps = session.scalars(select(Step).where(Step.status == "awaiting_approval")).all()
     for step in steps:
+        if step.request.status in TERMINAL_REQUEST_STATUSES:
+            continue
         pr_status = github_client.get_pull_request_status(step.pr_number)
         if pr_status.merged:
             step.status = "applied" if _produced_outputs_present(session, step) else "applying"
@@ -165,6 +180,11 @@ def _advance_applying(session: Session) -> None:
 
 def _roll_up_request(session: Session, request_id: str) -> None:
     request = session.get(ProvisioningRequest, request_id)
+    if request.status == "cancelled":
+        # An operator cancellation (#21) isn't derivable from Step statuses
+        # the way the other rollup outcomes below are, so it's not
+        # recomputed away.
+        return
     steps = request.steps
     if any(s.status in _FAILED_STEP_STATUSES for s in steps):
         request.status = "failed"
