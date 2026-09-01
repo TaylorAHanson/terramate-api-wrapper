@@ -7,6 +7,7 @@ rest of the app reads and writes through.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import ForeignKey, JSON, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -56,6 +57,11 @@ class Step(Base):
     pr_url: Mapped[str | None]
     plan_ref: Mapped[str | None]
     depends_on: Mapped[list[str]] = mapped_column(JSON)
+    # Wiring for #20's ordering-and-value-passing: `produces` is the apply-derived
+    # output names this Step will emit; `consumes` is the OutputRef ({step_key,
+    # output_name}) list this Step's bundle needs resolved before its PR opens.
+    produces: Mapped[list[str]] = mapped_column(JSON)
+    consumes: Mapped[list[dict]] = mapped_column(JSON)
     claimed_at: Mapped[datetime | None]
     claimed_by: Mapped[str | None]
     # Reserved seam, #10 — the future per-Step locking model.
@@ -73,5 +79,7 @@ class Output(Base):
     id: Mapped[str] = mapped_column(primary_key=True)
     step_id: Mapped[str] = mapped_column(ForeignKey("step.id"))
     key: Mapped[str]
-    value: Mapped[dict] = mapped_column(JSON)
+    # Any JSON-serializable apply-derived value (architecture.md §9's example
+    # is a bare terraform-emitted id) — not necessarily an object.
+    value: Mapped[Any] = mapped_column(JSON)
     captured_at: Mapped[datetime] = _server_now()

@@ -1,0 +1,47 @@
+{
+  "steps": [
+    {
+      "bundle_edits": [
+        {
+          "content": "stack \"analytics\" {\n  source = \"modules/workspace\"\n}\n",
+          "path": "stacks/workspaces/analytics/stack.tm.hcl",
+          "type": "add_file"
+        },
+        {
+          "content": "name: analytics\nmetastore: main\n",
+          "path": "stacks/workspaces/analytics/inputs.yaml",
+          "type": "add_file"
+        }
+      ],
+      "consumes": [],
+      "depends_on": [],
+      "key": "create",
+      "produces": [
+        "workspace_id"
+      ]
+    },
+    {
+      "bundle_edits": [
+        {
+          "path": "stacks/metastores/main/bindings.tm.yaml",
+          "type": "edit_file"
+        },
+        {
+          "path": "stacks/workspaces/analytics/inputs.yaml",
+          "type": "edit_file"
+        }
+      ],
+      "consumes": [
+        {
+          "output_name": "workspace_id",
+          "step_key": "create"
+        }
+      ],
+      "depends_on": [
+        "create"
+      ],
+      "key": "bind",
+      "produces": []
+    }
+  ]
+}
