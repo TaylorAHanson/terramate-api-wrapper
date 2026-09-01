@@ -75,6 +75,9 @@ ordering and a queue. Everything below is machinery in service of it.
 - The API **does not run Terraform** and **does not manage Terraform state** (see §2) — the
   Terramate repo's GitHub Actions and its remote backends own execution and state.
 - No auto-rollback and no resume-from-failed-step (a failed request halts for a human).
+  Recovery leans on **Terraform's own idempotency** — re-applying reconciles safely and won't
+  duplicate resources — rather than PR reverts (defense decision). MVP instead invests in
+  **pre-flight validation** to catch failures before execution.
 - Not the self-service application itself, and not a redesign of the Terramate repo.
 
 ---
@@ -169,8 +172,9 @@ sequenceDiagram
     H->>G: approve and merge PR
     G-->>A: poll, merged, apply running
     A->>DB: Step becomes applying
-    G-->>A: poll, apply complete with outputs
-    A->>DB: Step becomes applied, store Outputs
+    G->>DB: Action writes apply outputs to Lakebase via SDK
+    G-->>A: poll, apply complete
+    A->>DB: Step becomes applied, outputs already in Lakebase
   end
   A->>DB: Request becomes succeeded
   C->>A: GET v1 requests, status and plans
@@ -194,10 +198,15 @@ flowchart LR
 
 Mechanically, for an apply-derived dependency:
 
-1. The API opens Step *k*'s PR, waits for merge + apply.
-2. It **pulls** Step *k*'s Terraform outputs from that Actions run (a structured check-run
-   output / PR comment in an agreed contract — the API never reads Terraform state).
-3. It templates those outputs into Step *k+1*'s bundle files, then opens *k+1*'s PR.
+1. The API opens Step *k*'s PR and polls GitHub for merge + apply status.
+2. On apply, Step *k*'s **GitHub Action writes its Terraform outputs directly to Lakebase**
+   via the Databricks SDK (an agreed output-capture contract — see
+   [ADR-0002](./docs/adr/0002-output-capture-via-direct-lakebase-write.md)). The API never
+   reads Terraform state and never parses the run log; outputs are *pushed* to the store, not
+   pulled.
+3. Once the Action reports apply-complete, the API reads Step *k*'s captured outputs from
+   Lakebase and templates them (by **reference**, not by copying values around) into Step
+   *k+1*'s bundle files, then opens *k+1*'s PR.
 
 ## 6. State model
 
@@ -234,6 +243,13 @@ next.
   retired. Multiple versions can run side by side.
 - This is the mechanism that lets the **three systems change asynchronously**: a Terramate
   change is absorbed behind a new version rather than forced onto every client at once.
+- **Standard (defense decision): no breaking changes — only new versions with a deprecation
+  timeline.** Changes within a version are additive; anything breaking becomes a new `/vN`,
+  and old versions retire on an announced schedule.
+- Where possible, align API versions to **Terramate's own bundle-versioning** concept rather
+  than inventing a parallel scheme (research on the map, #3).
+- A **change-management process** — how new versions / deprecations / breaking-avoidance are
+  communicated to the self-service side — is needed and tracked on the map.
 - *Open:* whether a resource created under `/v1` is pinned to `/v1` for later changes
   (**version affinity**) — tied to whether day-2 modifications exist at all. Tracked as fog.
 
@@ -268,7 +284,8 @@ flowchart LR
   ACT --> HUMAN
   HUMAN -- merge --> ACT
   ACT --> BACKEND_STATE
-  BE -- "poll PR / checks / apply outputs" --> GHUB
+  ACT -- "write apply outputs (Databricks SDK)" --> LB
+  BE -- "poll PR / checks / merge status" --> GHUB
 ```
 
 **Why these pieces (grounded in the runtime constraints):**
@@ -282,9 +299,12 @@ flowchart LR
 - **Lakebase (managed Postgres)** is the durable store and the work queue. Standard Postgres
   semantics (`FOR UPDATE SKIP LOCKED`, transactions) make a crash-safe queue trivial.
 - **GitHub Actions** in the Terramate repo do all `plan`/`apply`. The API is a client of
-  GitHub, not an execution engine.
-- **Secrets** (the GitHub service-account PAT, any others) come from a Databricks secret
-  scope injected as env vars — never on disk, never in code.
+  GitHub, not an execution engine. On apply, the Action **writes the Step's Terraform outputs
+  straight to Lakebase via the Databricks SDK** (ADR-0002) — so the API polls GitHub only for
+  *status* (PR/checks/merge), never for output values, and still exposes no inbound endpoint.
+- **Secrets** (the GitHub service-account PAT, the Action's Lakebase write credential, any
+  others) come from a Databricks secret scope injected as env vars — never on disk, never in
+  code.
 
 ## 9. Data model (Lakebase)
 
@@ -294,7 +314,9 @@ Indicative v1 schema — the authoritative design is tracked on the wayfinder ma
   `idempotency_key` (unique), `status`, timestamps.
 - **step** — `id`, `request_id`, `ordinal`, `status`, `pr_number`, `pr_url`,
   `plan_ref`, `depends_on` (step ids), timestamps.
-- **output** — `id`, `step_id`, `key`, `value`, captured-at. Consumed by later Steps.
+- **output** — `id`, `step_id`, `key`, `value`, captured-at. **Written directly by the Step's
+  GitHub Action via the Databricks SDK** (ADR-0002), then referenced by later Steps. (SCD2
+  history under consideration — see #6.)
 - **Queue** — represented on `step.status` + a claim column; workers pull with
   `SELECT … FOR UPDATE SKIP LOCKED`.
 
@@ -308,6 +330,20 @@ Indicative v1 schema — the authoritative design is tracked on the wayfinder ma
   a GitHub App is the noted upgrade path for scoped, rotating credentials).
 - **API → Lakebase:** OAuth, via the App's injected Lakebase resource credentials.
 - **No secrets or state on disk.**
+
+**Identity & operational controls (defense decisions, detail on the map):**
+
+- **Asset identity (proposed):** a deterministic **UUIDv5** derived from business/domain
+  attributes as the durable, recreatable asset identifier — distinct from the client-supplied
+  **UUIDv4 `Idempotency-Key`**. It encodes domain/business/logical info so the same asset maps
+  to the same id across systems. *Open:* whether those encoding inputs are always known up
+  front. Naming/domain definition tracked on the map.
+- **Duplicate handling:** exact-duplicate prevention is the `Idempotency-Key`; **fuzzy
+  "a similar request already exists"** (by domain/recency) is **pushed left to the self-service
+  agent**, which is better placed to judge and avoids the API leaking cross-team info.
+- **Global off-switch:** an admin control that disables new-request intake for the whole system
+  (e.g. while Terramate itself is changing) while in-flight Steps drain — possibly a
+  "sandbox-only" mode. Design tracked on the map.
 
 ## 11. API surface (v1)
 
@@ -331,8 +367,9 @@ Indicative v1 schema — the authoritative design is tracked on the wayfinder ma
 | Long-running work | **Open PR + poll** | In-app background compute for applies | The App has a **~60 s HTTP timeout** and limited compute; Databricks steers long work off the request. With PR+poll there is no long work in the App at all. |
 | Type definitions | **Imperative Recipes in code** | Data-driven declarative registry | Per-type git operations vary too much ("edit 2 + add 2, in order" vs "find the right yaml, then edit it") to model declaratively before we've seen enough real recipes. Simple first (ADR-0001). |
 | Ordering / value-passing | **API owns it, one PR per Step** | Lean on Terramate's native output-sharing in one run | API ownership is what makes per-Step status and per-Step `terraform plan` visible. |
+| Output capture | **GitHub Action writes outputs directly to Lakebase (SDK)** | API polls the Actions run / a PR comment, or the Action POSTs to an API endpoint | Direct write is the simplest reliable path — no parsing run logs or check-runs, no inbound API endpoint, and Terramate's native output-sharing is undocumented. Chosen at the architecture defense ([ADR-0002](./docs/adr/0002-output-capture-via-direct-lakebase-write.md)). |
 | Change propagation | **URL-path versioning that pins the bundle interaction** | Single evolving contract | Lets the three systems change asynchronously; a breaking Terramate change becomes a new `/vN` rather than a forced flag-day. |
-| Status notifications | **In-app poller** | GitHub webhooks | No inbound endpoint/secret plumbing; matches "simple first". Webhooks are the noted latency/scale upgrade. |
+| Status notifications | **In-app poller (status only)** | GitHub webhooks | No inbound endpoint/secret plumbing; matches "simple first". (Output *values* arrive via the Action's direct Lakebase write, above; the poller only reads PR/check/merge status.) Webhooks are the noted latency/scale upgrade. |
 | Failure handling | **Halt, no auto-rollback** | Auto-destroy in reverse | Rollback of partially-applied infra is genuinely hard and risky; a human is better placed to decide. |
 
 ## 13. Build effort & schedule risk (what's easy, what's hard)
@@ -357,8 +394,7 @@ dependencies that no coding assistant can resolve for us.
 | Area | Why it's hard | What gates / de-risks it |
 |---|---|---|
 | **Recipe tribal knowledge per type** | The real per-type bundle edits ("edit 2 + add 2, in order"; "find the right yaml") can't be guessed and live outside the code. **The long pole.** | Bundle examples ([#2](https://github.com/TaylorAHanson/terramate-api-wrapper/issues/2)) + the Recipe interface ([#5](https://github.com/TaylorAHanson/terramate-api-wrapper/issues/5)); iterate with the platform team. |
-| **Actions → API output contract** | Requires a change in *another* repo's CI plus agreement on a JSON shape — coordination time, not coding time. | [#6](https://github.com/TaylorAHanson/terramate-api-wrapper/issues/6); start it early, in parallel with the build. |
-| **Cross-stack output semantics** | Whether we lean on Terramate's (undocumented) native output-sharing or capture-and-template ourselves needs experimentation against the real repo. | Resolved once examples land (#2). |
+| **Action → Lakebase output write** | *Mechanism* is decided (Action writes outputs to Lakebase via the Databricks SDK, ADR-0002), but it still needs a change in *another* repo's CI, a Lakebase write credential for the Action, and agreement on the row shape (+ SCD2?). Coordination time, not coding time. | [#6](https://github.com/TaylorAHanson/terramate-api-wrapper/issues/6); start it early, in parallel with the build. |
 | **Partial-apply failure reality** | "Halt, no rollback" is easy to state but messy to operate — what a human does next, drift, resume. | Accepted for v1; resume/rollback is fog. |
 | **Environment friction (enterprise-slow, airgapped)** | GH Service-account PAT, secret scopes, App→GitHub egress, and prod approval all take real calendar time. | Front-load the access/provisioning asks. |
 
@@ -375,8 +411,9 @@ Operational failure modes once it's running (distinct from the build/schedule ri
 | App redeploy kills an in-flight run | State is in Lakebase; a claimed Step that stalls is re-queued and resumed by the reconcile loop. |
 | Terramate repo layout changes break Recipes | Absorbed behind a new API version; old versions keep serving. |
 | Human approval is a latency wall between Steps | Inherent to the GitOps/approval model; visible in status as `awaiting_approval`. Auto-merge-per-policy is a fog item. |
-| Duplicate provisioning on client retries | `Idempotency-Key` dedupe at `POST`. |
-| GitHub treated as strongly consistent | Reconcile from PR/Actions truth on every tick; tolerate re-runs, delayed checks, and missing-then-present outputs. |
+| Duplicate provisioning on client retries | `Idempotency-Key` dedupe at `POST`. Fuzzy "similar request already exists" is pushed left to the self-service agent (defense decision). |
+| GitHub treated as strongly consistent | Reconcile from PR/Actions truth on every tick; tolerate re-runs and delayed checks. |
+| Action fails to write outputs to Lakebase (or writes partial) | A Step is not marked `applied` until its expected outputs are present in Lakebase; a missing/partial write holds the Step for a human rather than opening the next PR with a blank reference. |
 
 ---
 
@@ -391,7 +428,12 @@ intended shape.
 ### 15.1 MVP
 
 - **Interface:** `build(params) -> Playbook`, where a `Playbook` is an ordered list of `StepSpec`.
-- **StepSpec:** `{ key, bundle_edits: [FileEdit], depends_on: [step keys], consumes: [OutputRef], produces: [output names] }`.
+- **StepSpec:** `{ key, bundle_edits: [FileEdit], depends_on: [step keys], consumes: [OutputRef], produces: [output names], preflight: [Check], postflight: [Check] }`.
+- **Preflight / postflight checks** are **first-class `StepSpec` properties** (defense
+  decision). A **preflight** runs *before* the Step's PR is opened and can fail — or skip — the
+  Step early: e.g. *is a CIDR range available?*, *does this resource already exist so we can
+  skip creating it?* (possibly via Databricks SDK / MCP lookups). A **postflight** validates
+  *after* apply. Defining the check framework is a map ticket.
 - **FileEdit:** `AddFile(path, content)` or `EditFile(path, yaml_patch)`. Prefer a
   **structured YAML patch** (parse → mutate → serialize) over text munging — safer and
   reviewable in the PR diff.
@@ -441,6 +483,50 @@ class WorkspaceRecipe(Recipe):
 The reconcile loop opens the `create` PR, waits for merge + apply, captures `workspace_id`,
 resolves the placeholder into the `bind` bundle, then opens the `bind` PR.
 
+A contrasting sketch for the `schema` recipe — the pure "find the right catalog, then add the
+schema to it" case. It is a **single Step**: the catalog already exists, so nothing has to be
+applied first, there is no apply-derived Output to wait on, and every value is API-known up
+front (see §5.1). This is the whole reason a Recipe is imperative code — locating *which*
+catalog yaml to touch is a lookup, not a template:
+
+```python
+class SchemaRecipe(Recipe):
+    type = "schema"
+
+    def build(self, p: SchemaParams) -> Playbook:
+        # "find the right catalog" — a lookup against existing repo content
+        catalog_file = locate_catalog(p.catalog)   # raises if the catalog isn't found
+        return Playbook([
+            StepSpec(
+                key="add-schema",
+                bundle_edits=[
+                    EditFile(catalog_file, add_schema_patch(p.name, p.owner, p.comment)),
+                ],
+                # no depends_on, no consumes, no produces — one PR, no value-passing
+            ),
+        ])
+```
+
+The reconcile loop opens the single `add-schema` PR and the request succeeds once it is merged
+and applied — no waiting on an earlier Step, because there isn't one.
+
+**What's ours vs. what the framework gives us.** The sketches lean on two layers. `Playbook`,
+`StepSpec`, `AddFile`, `EditFile`, and `OutputRef` are the **Recipe framework** — the interface
+from the bullets above, provided once and used by every recipe. Everything else — the
+`render_*`, `locate_*`, and `*_patch` calls — is **code we write per type**, and it factors
+into three kinds:
+
+- **Renderers — `render_*`** (e.g. `render_stack`, `render_inputs`): build the full contents
+  of a *new* file from `params`. Paired with `AddFile`.
+- **Locators — `locate_*`** (e.g. `locate_catalog`, `locate_metastore_binding`): the "find the
+  right yaml" lookups against existing repo content; return the path to edit and raise if it's
+  missing.
+- **Patchers — `*_patch`** (e.g. `add_schema_patch`, `bind_workspace_patch`, `set_owner_patch`):
+  compute a structured YAML mutation for an *existing* file. Paired with `EditFile`.
+
+These custom helpers are the seeds of the shared helper library noted in §15.2: the first few
+recipes write them inline; the common shape gets extracted once enough recipes reveal it.
+
 ### 15.2 Future possibilities
 
 - **A helper library** as recipes accrete: a YAML-patch toolkit, a "locate the right file"
@@ -466,3 +552,73 @@ authorization · GitHub App vs PAT · PR-approval as configurable policy.
 **Out of scope:** Terraform execution + state (owned by the repo's Actions/backends) ·
 auto-rollback + resume-from-failed-Step · the self-service application · the Terramate repo's
 internal design.
+
+## 17. Discussion (defense meeting — raw notes)
+
+> Captured at the architecture-defense meeting; full summary in
+> [`arch_defense_meeting_notes.text`](./arch_defense_meeting_notes.text). The decisions below
+> have been **reconciled into the sections above** — output capture → §5 / §8 / §12 /
+> [ADR-0002](./docs/adr/0002-output-capture-via-direct-lakebase-write.md); versioning standard
+> → §7; preflight/postflight → §15.1; asset identity, dedupe, off-switch → §10; recovery →
+> §3 — and into the [wayfinder map](https://github.com/TaylorAHanson/terramate-api-wrapper/issues/1)
+> as new tickets and fog. The raw notes are kept here as the source log.
+
+### 2 Failure Modes
+- Compile time -  
+  - Introduce Pre-flight request checks as part of StepSpec()
+  - __Example: Check availability of CIDR ranges__
+  - Consider that some things may already be created and not needed to be created (perhaps this is further left, Databricks SDK / MCP calls )
+- Run time
+**Key Decision:** Should we do a PR revert? **No.** Rely on Terraform idempotency.
+
+### Locking 
+**Consider:** If you are doing some kind of edit where you need set the target into "just me" mode so concurrent edits don't blow it up, 
+- Option 1: Add as first class property of StepSpec
+- Option 2: Simple, nuclear, "LOCK ALL" for a given playbook
+- Both
+
+**Consider:** What if terraform itself changes while the resource is being created/edited?
+- "Sandbox Only" mode as well? 
+- API stays live for requests while the stuff right of a playbook is off? 
+- Consider 20X instead of 202 to RESTfully expose the delay
+- Terramate itself has bundle versioning concept, consider tieing these together to API versioning
+- Set architecture standard: NO breaking changes, only new versions w/ deprecation timeline
+**Key Decision:** Off button for the system as a whole.
+
+### Dupllicate Requests
+**Consider:** Team disucsses "we need a new catalog". 2 people in that team put in the request right after that meeting. 
+- "similar request exists" functionality? Dedupe by domain, recentness.  
+- Security concerns - don't leak info
+**Key Decision:** Push Left, good job for an agent
+
+### Consider UUID**v5** for a unique asset identifier and use that as the idempotency key (which would have UUIDv4). 
+This gives us a more durable, recreatable ID to use across the system. 
+Encodes Domains, business, logical info
+**Consider** Do we have this info upfront always? 
+Reference: 
+```
+- **HTTP layer** — validates the request against the type's schema (OpenAPI discriminated
+  union on `type`), enforces the `Idempotency-Key`, persists the ProvisioningRequest, returns
+  a tracking id. Read endpoints report status and the `terraform plan`.
+```
+
+### Change Management Process
+We need some way of communicating new versions, deprecations, changes to SSC. 
+
+### Persist Console Output
+Step 1 > Terramate Apply > console output (to be used in step 2) > [solution] > step 2
+Referring to "Terramate's (undocumented) native output-sharing"
+Options
+- API polls Github Actions output
+- API polls Github PR (comment? Text body)
+- Github Actions POST to API
+**- Direct write to Lakebase via sdk**
+Decision: **Direct write from GH action to Lakebase via sdk** SCD 2?
+Future consideration: Consider threading this into restfull endpoints to expose status so an agent could reason over it and suggest what to do next in various unhandled failure modes
+
+### Nomenclature
+- *Preflight* and *postflight* checks should be first class properties of StepSpec. Define as a concept.
+- The UUIDv5 needs to have a name/ domain definintion
+
+### UI
+Add a as a future feature

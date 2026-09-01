@@ -1,0 +1,231 @@
+ource: Meeting transcript (transcribed meeting)
+Meeting was transcribed: Yes
+Executive Summary
+This working session focused on the architecture and implementation approach for integrating the EDH Self-Service Center (SSC) with Terraform/Terramate-based provisioning. The team reviewed a proposed API abstraction layer, workflow orchestration patterns, recipe/playbook-driven provisioning, dependency management, failure handling, versioning, output sharing, and implementation planning. The discussion centered on keeping SSC business-focused while encapsulating infrastructure complexity behind an orchestration layer.
+Topic 1: API Abstraction Layer Between SSC and Terraform/Terramate
+Discussion
+Taylor presented a proposed architecture that introduces a dedicated API layer between Self-Service Center and the Terraform/Terramate platform.
+Key objectives included:
+Decoupling SSC from Terraform implementation details.
+Removing infrastructure tribal knowledge from SSC workflows.
+Providing a stable contract between business requests and infrastructure automation.
+Supporting future versioning and platform changes without requiring SSC redesign.
+Restricting the interface to business-oriented requests rather than infrastructure actions.
+The proposed model:
+SSC → API Request → Orchestration Layer → GitHub PRs → Terraform/Terramate
+The API layer would:
+Receive requests such as "Create Workspace."
+Translate requests into provisioning actions.
+Generate and manage PRs.
+Coordinate multi-step workflows.
+Remain intentionally lightweight.
+Khiem reinforced the importance of maintaining business-focused abstractions and preventing Terraform concepts from leaking into SSC.
+Key Decisions
+✅ Infrastructure complexity should remain hidden from SSC consumers.
+✅ API contracts should represent business capabilities rather than technical implementations.
+✅ The API layer should be thin and focused on orchestration.
+Action Items
+Item	Description	Owner
+Refine API architecture	Continue developing and documenting the orchestration-layer design	Taylor
+Define API contract boundaries	Clarify SSC responsibilities versus provider responsibilities	Taylor, Nagendra
+Review architecture proposal	Validate proposed abstraction model with the broader team	SSC Architecture Team
+Topic 2: Recipe and Playbook Framework
+Discussion
+A significant portion of the discussion focused on representing provisioning workflows using recipes and playbooks.
+Taylor proposed:
+Recipe
+A reusable definition describing how a resource type is provisioned.
+Examples:
+Workspace
+Catalog
+Schema
+Playbook
+A runtime instantiation of a recipe for a specific request.
+Capabilities discussed:
+Sequential execution
+Parallel execution
+Dependency tracking
+Output passing between steps
+State transitions
+Example discussed:
+Workspace Provisioning
+Create foundational YAML artifacts.
+Wait for approval and merge.
+Capture outputs.
+Execute dependent updates.
+The team reviewed how dependencies can be modeled declaratively using depends_on relationships.
+Key Decisions
+✅ Provisioning logic should be encoded into reusable recipes.
+✅ Playbooks should support explicit dependency handling.
+✅ Workflow definitions should remain independent of SSC business logic.
+Action Items
+Item	Description	Owner
+Finalize recipe structure	Define standard recipe format and lifecycle	Taylor
+Define playbook execution model	Establish dependency and sequencing behavior	Taylor
+Validate DSL approach	Evaluate maintainability of proposed playbook syntax	SSC Architecture Team
+Topic 3: Multi-Step Workflow Orchestration
+Discussion
+The team evaluated how compound provisioning workflows should operate.
+Examples discussed:
+Workspace onboarding
+Catalog provisioning
+Schema provisioning
+Future domain onboarding
+There was discussion regarding ownership of orchestration logic.
+Questions included:
+Should orchestration reside within SSC?
+Should orchestration reside in the API layer?
+Which system should manage execution dependencies?
+The team generally aligned that orchestration belongs behind SSC within the platform implementation layer.
+Taylor demonstrated dependency-based execution using directed workflow sequencing.
+Key Decisions
+✅ Workflow orchestration should be separated from SSC.
+✅ Multi-step provisioning should support dependency-aware execution.
+✅ Compound workflows will be composed of smaller provisioning actions.
+Action Items
+Item	Description	Owner
+Define orchestration strategy	Document dependency-aware workflow approach	Taylor
+Define workflow execution states	Establish transitions and lifecycle stages	SSC Architecture Team
+Review compound workflow use cases	Validate onboarding and multi-resource scenarios	Taylor, Nagendra
+Topic 4: Failure Handling and Recovery Strategy
+Discussion
+The team examined how provisioning failures should be handled.
+Discussion focused on two classes of failures:
+Pre-Execution Failures
+Examples:
+No available subnet capacity.
+Missing prerequisites.
+Invalid requests.
+Runtime Failures
+Examples:
+Infrastructure deployment failures.
+Partial workflow execution.
+Dependency failures.
+Khiem advocated for strong pre-validation before execution begins.
+Nagendra explained that Terraform state management naturally prevents resource duplication and can safely reconcile previously created resources during retries.
+The team discussed avoiding rollback complexity in the MVP.
+Key Decisions
+✅ MVP should prioritize pre-flight validation.
+✅ Automated rollback is not required for the first implementation.
+✅ Terraform state should be leveraged for safe recovery scenarios.
+Action Items
+Item	Description	Owner
+Define pre-flight validation framework	Identify checks required before execution	Nagendra, Khiem
+Document failure handling approach	Define expected behavior for failed workflows	Taylor
+Evaluate retry strategy	Determine safe recovery and resubmission behavior	SSC Architecture Team
+Topic 5: Queueing, Locking, and Duplicate Request Handling
+Discussion
+The team reviewed how concurrent requests should be managed.
+Topics discussed:
+Terraform state locking
+Concurrent modifications
+Duplicate requests
+Queueing behavior
+Khiem recommended using business-oriented metadata and resource identities rather than exposing system-generated identifiers.
+Taylor described using idempotency keys to prevent duplicate submissions.
+Discussion also explored:
+User-submitted duplicate requests.
+Cross-user duplicate requests.
+Resource-level uniqueness.
+Key Decisions
+✅ Duplicate requests should be prevented using idempotency mechanisms.
+✅ Business metadata should be used to identify resources.
+✅ Request tracking should occur at the orchestration layer.
+Action Items
+Item	Description	Owner
+Design idempotency model	Prevent duplicate request processing	Taylor
+Define queue management behavior	Evaluate handling before Terraform lock contention occurs	Taylor, Nagendra
+Establish resource identity standards	Define business-centric identifiers	Khiem
+Topic 6: Output Sharing and Persistent State
+Discussion
+A major technical discussion centered around sharing outputs between provisioning steps.
+Example:
+Workspace provisioned.
+Workspace ID generated.
+Future steps require the Workspace ID.
+Challenges discussed:
+Retrieving outputs from GitHub Actions.
+Persisting results between provisioning stages.
+Synchronizing execution state.
+Potential approaches included:
+Polling for outputs.
+Persistent state storage.
+Central communication tables.
+Lakebase/Postgres-backed references.
+Khiem suggested storing outputs centrally and passing references rather than passing values between workflow stages.
+Key Decisions
+✅ Provisioning workflows require persistent state.
+✅ Outputs will likely need centralized storage.
+✅ Additional research is required before implementation.
+Action Items
+Item	Description	Owner
+Research Terraform output retrieval patterns	Determine how outputs become accessible to orchestration layer	Nagendra
+Evaluate central persistence design	Assess Lakebase/Postgres options	Khiem, Taylor
+Define state persistence architecture	Document storage and retrieval model	SSC Architecture Team
+Topic 7: Versioning and Contract Evolution
+Discussion
+The team discussed how platform evolution impacts live requests.
+Areas discussed:
+Bundle versioning
+API versioning
+Input contract changes
+Backward compatibility
+Potential solutions:
+V1/V2 contracts
+Deprecation models
+Bundle version management
+Administrative disablement controls
+Nagendra explained that Terramate already supports version-oriented concepts that may help manage transitions.
+The team agreed that future changes should be additive rather than breaking whenever possible.
+Key Decisions
+✅ Versioning is required across contracts and templates.
+✅ Breaking changes should result in new versions.
+✅ In-flight workflows must remain protected during upgrades.
+Action Items
+Item	Description	Owner
+Research bundle versioning capabilities	Evaluate Terramate version management	Nagendra
+Define compatibility model	Establish version transition strategy	SSC Architecture Team
+Document change management process	Define governance around upgrades	Taylor, Nagendra
+Topic 8: MVP Feasibility and Implementation Planning
+Discussion
+The final portion of the session focused on implementation planning.
+Taylor assessed the complexity of various components:
+Lower Complexity
+API construction
+State machine orchestration
+PR generation
+Higher Complexity
+Recipe creation
+Workflow modeling
+Dependency management
+Output capture and sharing
+Nagendra described the ongoing sandbox build effort that will provide:
+Separate AWS environment
+Non-production testing capabilities
+GitHub Actions experimentation
+Safe Terraform validation
+The group aligned on starting with a minimal viable implementation to validate concepts before expanding functionality.
+Key Decisions
+✅ MVP implementation should proceed.
+✅ Learning from implementation is preferred over extended theoretical design.
+✅ Sandbox infrastructure will be used for testing.
+Action Items
+Item	Description	Owner
+Develop orchestration MVP	Build initial API-layer prototype	Taylor
+Complete sandbox environment	Finalize isolated testing platform	Nagendra
+Provision GitHub testing access	Enable workflow experimentation	Nagendra
+Validate architecture assumptions	Use MVP findings to refine design	SSC Architecture Team
+Consolidated Action Item Summary
+Item	Description	Owner
+Build orchestration-layer MVP	Implement API-based provisioning prototype	Taylor
+Finalize recipe/playbook model	Define provisioning workflow framework	Taylor
+Complete sandbox platform setup	Enable safe testing environment	Nagendra
+Research Terramate bundle versioning	Validate version management strategy	Nagendra
+Design pre-flight validation process	Prevent invalid provisioning requests	Nagendra, Khiem
+Define idempotency standards	Prevent duplicate execution	Taylor
+Establish business resource identity model	Use logical resource identifiers	Khiem
+Evaluate persistent-state architecture	Support outputs and workflow coordination	Taylor, Khiem
+Define versioning and compatibility strategy	Support contract evolution	Taylor, Nagendra
+Validate architecture through MVP	Use implementation findings to drive future design	SSC Architecture Team
+Overall Outcome
+The team aligned on an architecture where SSC remains focused on business operations while a dedicated orchestration layer handles workflow execution, dependency management, GitHub integration, and Terraform/Terramate interaction. The major open areas remain output propagation, persistent workflow state, failure handling, and version management. The next phase is an MVP implementation supported by a dedicated sandbox environment to validate the overall approach and uncover remaining design challenges.

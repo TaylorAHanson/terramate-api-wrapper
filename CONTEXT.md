@@ -66,10 +66,11 @@ added in the cloned terramate repo. The concrete unit the API generates.
 A value produced by an applied Step (e.g. an id emitted by terraform) that a later Step
 in the same Playbook consumes as an input. The reason ordering matters — distinct from values
 the API can mint up front (e.g. a UUID), which need no ordering; only these apply-derived
-Outputs force a later Step to wait for an earlier Step's apply. Captured by the API
-by **pulling** it from the Step's Actions run (a structured check-run output / PR comment
-in an agreed contract), since the API never reads terraform state directly. Requires the
-terramate repo's Actions to emit outputs in that contract.
+Outputs force a later Step to wait for an earlier Step's apply. Captured by the Step's
+**GitHub Action writing the outputs directly into Lakebase via the Databricks SDK** (an agreed
+contract — see `docs/adr/0002-output-capture-via-direct-lakebase-write.md`); the API then reads
+them from Lakebase and never reads terraform state or parses the run log. Later Steps consume an
+Output by **reference**, not by copying its value around.
 
 ### Version
 A `/vN` of the API, **selected by the client via the URL path**. Pins the way the API
@@ -78,3 +79,28 @@ Terramate/Terraform can change asynchronously — when Terramate changes, a new 
 cut over to while old versions keep working. (Open/fog: possible *version affinity* — a
 resource created under v1 stays pinned to v1 for later changes; tied to whether day-2
 modifications exist at all.)
+
+### Preflight check
+A validation attached to a Step that runs **before** the Step's PR is opened and can fail — or
+skip — the Step early: e.g. "is a CIDR range available?", "does this resource already exist, so
+skip creating it?" (possibly via Databricks SDK / MCP lookups). A **first-class property of a
+StepSpec** (defense decision), distinct from `terraform plan`, which runs later inside Actions.
+
+### Postflight check
+A validation attached to a Step that runs **after** its apply completes, to confirm the Step
+produced what was expected. Also a first-class StepSpec property. Paired concept with
+[[preflight-check]].
+
+### Asset identifier
+A deterministic, business/domain-encoded **UUIDv5** proposed as the durable, recreatable id for
+a provisioned asset across systems — distinct from the [[idempotency-key]]. Because it is
+derived from stable attributes (domain, business, logical info), the same asset resolves to the
+same id. *Open:* whether those inputs are always available up front. (Proposed at the defense;
+naming/domain definition tracked on the map.)
+
+### Idempotency-Key
+A client-supplied **UUIDv4** on `POST /vN/requests` that prevents an *exact* duplicate
+submission from creating a second ProvisioningRequest. It is about de-duplicating the *request*,
+not identifying the *asset* (that is the [[asset-identifier]]). "A similar request already
+exists" — fuzzy dedupe by domain/recency — is a separate concern pushed left to the self-service
+agent, not the API.
