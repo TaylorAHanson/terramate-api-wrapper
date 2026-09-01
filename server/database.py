@@ -14,7 +14,7 @@ of this and points straight at a plain Postgres instance.
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, Iterator
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine, make_url
@@ -105,3 +105,12 @@ def reset_engine() -> None:
 
 def get_session() -> Session:
     return Session(bind=get_engine())
+
+
+def get_db() -> Iterator[Session]:
+    """FastAPI dependency: a request-scoped Session, closed after the route runs."""
+    session = get_session()
+    try:
+        yield session
+    finally:
+        session.close()

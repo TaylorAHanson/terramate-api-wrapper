@@ -1,0 +1,16 @@
+{
+  "steps": [
+    {
+      "bundle_edits": [
+        {
+          "path": "stacks/catalogs/research/catalog.tm.yaml",
+          "type": "edit_file"
+        }
+      ],
+      "consumes": [],
+      "depends_on": [],
+      "key": "add-schema",
+      "produces": []
+    }
+  ]
+}
