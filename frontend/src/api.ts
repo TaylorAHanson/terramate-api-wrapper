@@ -59,3 +59,44 @@ export async function getStepPlan(requestId: string, ordinal: number): Promise<S
   }
   return response.json();
 }
+
+export interface CancelResult {
+  request_id: string;
+  status: string;
+}
+
+export async function cancelRequest(requestId: string): Promise<CancelResult> {
+  const response = await fetch(`/v1/requests/${requestId}/cancel`, { method: "POST" });
+  if (response.status === 409) {
+    throw new Error("Request already reached a terminal state");
+  }
+  if (!response.ok) {
+    throw new Error(`POST /v1/requests/${requestId}/cancel failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export interface IntakeGate {
+  enabled: boolean;
+  updated_at: string;
+}
+
+export async function getIntakeGate(): Promise<IntakeGate> {
+  const response = await fetch("/v1/admin/intake-gate");
+  if (!response.ok) {
+    throw new Error(`GET /v1/admin/intake-gate failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function setIntakeGate(enabled: boolean): Promise<IntakeGate> {
+  const response = await fetch("/v1/admin/intake-gate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!response.ok) {
+    throw new Error(`POST /v1/admin/intake-gate failed: ${response.status}`);
+  }
+  return response.json();
+}

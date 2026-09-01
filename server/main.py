@@ -14,12 +14,13 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from server.routes import health, requests
+from server.routes import admin, health, requests
 
 app = FastAPI(title="Terramate Provisioning API")
 
 app.include_router(health.router)
 app.include_router(requests.router)
+app.include_router(admin.router)
 
 _FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 

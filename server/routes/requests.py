@@ -1,14 +1,17 @@
-"""`POST /v1/requests`, `GET /v1/requests/{id}`, and
-`GET /v1/requests/{id}/steps/{n}/plan` (architecture.md §5, §11).
+"""`POST /v1/requests`, `GET /v1/requests/{id}`,
+`GET /v1/requests/{id}/steps/{n}/plan`, and `POST /v1/requests/{id}/cancel`
+(architecture.md §5, §6, §11).
 
-`POST` validates the body against its type's discriminated-union member
-(published in `/openapi.json`), dedupes on `Idempotency-Key`, persists the
+`POST` checks the intake gate (`server.intake_gate`, #21) is open, validates
+the body against its type's discriminated-union member (published in
+`/openapi.json`), dedupes on `Idempotency-Key`, persists the
 ProvisioningRequest, and expands its type's Recipe into a persisted Playbook
 of one or more Steps — translating each StepSpec's `depends_on` (Step *keys*)
 into the Step *row ids* generated here, since those ids don't exist until
 insert time. The reconcile loop (`server.orchestrator`) then claims and
 advances that Playbook's Steps; the `/plan` route just reads back the
-`terraform plan` the loop captured once a Step has one.
+`terraform plan` the loop captured once a Step has one, and `/cancel` halts
+a request the same way a failed Step does.
 """
 from __future__ import annotations
 
@@ -23,7 +26,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from server.database import get_db
+from server.intake_gate import get_gate
 from server.models import ProvisioningRequest, Step
+from server.orchestrator import TERMINAL_REQUEST_STATUSES
 from server.recipes.registry import RECIPES
 from server.recipes.schema import SchemaProvisioningRequest
 from server.recipes.workspace import WorkspaceProvisioningRequest
@@ -111,6 +116,9 @@ def create_request(
     if existing is not None:
         return CreateRequestResponse(request_id=existing.id, status=existing.status)
 
+    if not get_gate(session).enabled:
+        raise HTTPException(status_code=503, detail="Intake is currently disabled")
+
     recipe = RECIPES[body.type]
     playbook = recipe.build(body.params)
 
@@ -188,3 +196,33 @@ def get_step_plan(
     if step.plan_ref is None:
         raise HTTPException(status_code=409, detail="Plan not available yet")
     return StepPlanResponse(ordinal=step.ordinal, key=step.key, status=step.status, plan=step.plan_ref)
+
+
+class CancelRequestResponse(BaseModel):
+    request_id: str
+    status: str
+
+
+@router.post("/v1/requests/{request_id}/cancel", response_model=CancelRequestResponse)
+def cancel_request(request_id: str, session: Session = Depends(get_db)) -> CancelRequestResponse:
+    """Halt an in-flight request (architecture.md §6, §11).
+
+    Already-applied Steps stay applied — this only stops the reconcile loop
+    from claiming or advancing this request's Steps any further (enforced by
+    `orchestrator.TERMINAL_REQUEST_STATUSES`); it does not touch GitHub or
+    any Step row. Cancelling an already-cancelled request is a no-op success
+    (idempotent); cancelling one that reached a different terminal state on
+    its own is a conflict, since that outcome can't be undone by cancelling.
+    """
+    request_row = session.get(ProvisioningRequest, request_id)
+    if request_row is None:
+        raise HTTPException(status_code=404, detail="Request not found")
+    if request_row.status == "cancelled":
+        return CancelRequestResponse(request_id=request_row.id, status=request_row.status)
+    if request_row.status in TERMINAL_REQUEST_STATUSES:
+        raise HTTPException(
+            status_code=409, detail=f"Request already reached a terminal state: {request_row.status}"
+        )
+    request_row.status = "cancelled"
+    session.commit()
+    return CancelRequestResponse(request_id=request_row.id, status=request_row.status)
