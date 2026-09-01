@@ -41,23 +41,39 @@ def _fetch_lakebase_credential(instance_name: str) -> tuple[str, str]:
     return user, credential.token
 
 
-def _connect() -> Any:
+def connect_to_url(database_url: str) -> Any:
+    """Open a psycopg2 connection to any SQLAlchemy-style Postgres URL.
+
+    Shared by the app's own `_connect()` below and by anything else that
+    needs to reach a plain Postgres by URL (e.g. tests booting an embedded
+    instance) — both need the same driver-scheme parsing and unix-socket
+    fallback, so this is the one place that does it.
+    """
     import psycopg2
 
+    # psycopg2 doesn't understand SQLAlchemy's driver-qualified
+    # postgresql+psycopg2:// scheme, so parse with SQLAlchemy (which
+    # handles percent-encoded credentials correctly) and connect with the
+    # decoded components rather than string-munging the URL.
+    url = make_url(database_url)
+    # A unix-domain-socket URL (e.g. from an embedded/local Postgres) has no
+    # network host — the socket directory instead rides in the `host` query
+    # param (`postgresql://user@/db?host=/path/to/sockdir`), since a bare
+    # `/path` can't sit in a URL's host position.
+    host = url.host or url.query.get("host")
+    return psycopg2.connect(
+        host=host,
+        port=url.port,
+        dbname=url.database,
+        user=url.username,
+        password=url.password,
+    )
+
+
+def _connect() -> Any:
     settings = get_settings()
     if settings.database_url:
-        # psycopg2 doesn't understand SQLAlchemy's driver-qualified
-        # postgresql+psycopg2:// scheme, so parse with SQLAlchemy (which
-        # handles percent-encoded credentials correctly) and connect with the
-        # decoded components rather than string-munging the URL.
-        url = make_url(settings.database_url)
-        return psycopg2.connect(
-            host=url.host,
-            port=url.port,
-            dbname=url.database,
-            user=url.username,
-            password=url.password,
-        )
+        return connect_to_url(settings.database_url)
 
     if not settings.lakebase_instance_name:
         raise RuntimeError(
