@@ -1,0 +1,5 @@
+catalog: research
+schemas:
+  - name: bronze
+    owner: data-eng
+    comment: raw landing data
