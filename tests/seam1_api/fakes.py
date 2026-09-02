@@ -7,8 +7,10 @@ ever touching real GitHub.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Sequence
 
 from server.github_client import GitHubClient, PullRequestRef, PullRequestStatus
+from server.recipes.framework import FileEdit
 
 
 @dataclass
@@ -17,6 +19,7 @@ class OpenedPullRequest:
     base_branch: str
     title: str
     body: str
+    edits: Sequence[FileEdit] = field(default_factory=tuple)
 
 
 @dataclass
@@ -31,10 +34,18 @@ class FakeGitHubClient(GitHubClient):
     closed_unmerged_pr_numbers: set[int] = field(default_factory=set)
 
     def open_pull_request(
-        self, *, branch_name: str, base_branch: str, title: str, body: str
+        self,
+        *,
+        branch_name: str,
+        base_branch: str,
+        title: str,
+        body: str,
+        edits: Sequence[FileEdit] = (),
     ) -> PullRequestRef:
         self.opened_pull_requests.append(
-            OpenedPullRequest(branch_name=branch_name, base_branch=base_branch, title=title, body=body)
+            OpenedPullRequest(
+                branch_name=branch_name, base_branch=base_branch, title=title, body=body, edits=edits
+            )
         )
         number = len(self.opened_pull_requests)
         return PullRequestRef(number=number, url=f"https://github.com/example/repo/pull/{number}")

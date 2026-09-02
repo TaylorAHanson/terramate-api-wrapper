@@ -8,11 +8,13 @@ check whether any merged Step's apply-derived Outputs have landed yet, then
 claim and open PRs for every currently-runnable queued Step — in that order,
 so a Step that just became runnable this pass is claimed the same tick.
 
-v1 has no live GitHub-Actions check polling yet — that lands with the
-fixture-repo integration (Seam 3, #22). Until then, a Step's plan is
-available synchronously once its PR is open (so `pr_open`/`planning`/
-`planned` collapse into one reconcile pass, ending at `awaiting_approval`) —
-there is no real signal yet to gate that sub-transition on.
+v1 still collapses `pr_open`/`planning`/`planned` into one reconcile pass,
+ending at `awaiting_approval` — there is no persisted state for "PR open,
+plan not back yet." Against the real fixture repo (#22) that collapse is
+absorbed by `RealGitHubClient.get_plan` itself, which blocks (bounded, with
+a timeout) until the real `terraform-plan` check run lands, rather than the
+orchestrator polling across ticks — un-collapsing these into their own
+tracked sub-states remains future work (see #19).
 
 `merged` -> `applying` -> `applied` does **not** collapse the same way for a
 Step with apply-derived Outputs (#20): a merged Step is held at `applying`
@@ -34,6 +36,8 @@ from sqlalchemy.orm import Session
 
 from server.github_client import GitHubClient
 from server.models import Output, ProvisioningRequest, Step
+from server.recipes.framework import AddFile, EditFile, FileEdit
+from server.recipes.registry import RECIPES
 
 _FAILED_STEP_STATUSES = {"plan_failed", "apply_failed", "rejected"}
 
@@ -99,6 +103,7 @@ def _claim_and_open_next(session: Session, github_client: GitHubClient) -> bool:
         base_branch="main",
         title=f"{step.request.type}: {step.key}",
         body=body,
+        edits=_resolve_edits(step, resolved),
     )
     step.pr_number = pr.number
     step.pr_url = pr.url
@@ -136,6 +141,56 @@ def _resolve_consumes(session: Session, step: Step) -> list[tuple[dict, Any]]:
         ).one()
         resolved.append((ref, output.value))
     return resolved
+
+
+def _resolve_edits(step: Step, resolved: list[tuple[dict, Any]]) -> list[FileEdit]:
+    """Rebuild the Step's `bundle_edits` from its Recipe (§15.1) and substitute
+    each `${steps.<key>.outputs.<name>}` placeholder (already resolved above)
+    with its real value, so the real GitHubClient commits actual apply-derived
+    content rather than the placeholder token (#22 — this was previously only
+    a PR-body stand-in, see #20).
+
+    Recipes are pure functions of `params` (persisted on the request), so
+    rebuilding here reproduces the exact same StepSpec that was built at
+    request-creation time — nothing here is re-decided.
+    """
+    recipe = RECIPES[step.request.type]
+    playbook = recipe.build_from_params_dict(step.request.params)
+    spec = next(s for s in playbook.steps if s.key == step.key)
+    substitutions = {
+        f"${{steps.{ref['step_key']}.outputs.{ref['output_name']}}}": value for ref, value in resolved
+    }
+    return [_substitute_edit(edit, substitutions) for edit in spec.bundle_edits]
+
+
+def _substitute_edit(edit: FileEdit, substitutions: dict[str, Any]) -> FileEdit:
+    if isinstance(edit, AddFile):
+        return AddFile(edit.path, _substitute_text(edit.content, substitutions))
+    if isinstance(edit, EditFile):
+        original_patch = edit.patch
+        return EditFile(
+            edit.path,
+            lambda document: _substitute_structure(original_patch(document), substitutions),
+        )
+    raise TypeError(f"Unknown FileEdit type: {type(edit)!r}")
+
+
+def _substitute_text(text: str, substitutions: dict[str, Any]) -> str:
+    for placeholder, value in substitutions.items():
+        text = text.replace(placeholder, str(value))
+    return text
+
+
+def _substitute_structure(value: Any, substitutions: dict[str, Any]) -> Any:
+    """Recurse through an `EditFile.patch`-mutated dict/list, substituting
+    placeholders in every string leaf (see `_substitute_edit`)."""
+    if isinstance(value, str):
+        return _substitute_text(value, substitutions)
+    if isinstance(value, dict):
+        return {k: _substitute_structure(v, substitutions) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_substitute_structure(v, substitutions) for v in value]
+    return value
 
 
 def _produced_outputs_present(session: Session, step: Step) -> bool:

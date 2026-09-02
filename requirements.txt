@@ -5,3 +5,4 @@ sqlalchemy>=2.0
 psycopg2-binary
 alembic
 httpx
+pyyaml

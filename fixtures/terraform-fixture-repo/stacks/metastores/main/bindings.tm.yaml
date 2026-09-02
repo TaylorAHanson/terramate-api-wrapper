@@ -1,0 +1,4 @@
+# Seeded for Seam 3's `workspace` Recipe test (terramate-api-wrapper#22):
+# server.recipes.workspace.locate_metastore_binding("main") points here.
+name: main
+bindings: []

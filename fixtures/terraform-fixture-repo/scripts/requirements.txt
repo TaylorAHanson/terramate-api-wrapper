@@ -1,0 +1,2 @@
+psycopg2-binary
+databricks-sdk>=0.56.0

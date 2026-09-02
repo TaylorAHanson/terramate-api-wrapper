@@ -1,0 +1,4 @@
+# Seeded for Seam 3's `schema` Recipe test (terramate-api-wrapper#22):
+# server.recipes.schema.locate_catalog("research") points here.
+name: research
+schemas: []

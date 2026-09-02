@@ -1,0 +1,7 @@
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+plan.tfplan
+plan.txt
+.terraform-fixture-marker.json

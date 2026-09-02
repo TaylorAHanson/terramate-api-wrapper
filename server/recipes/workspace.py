@@ -77,6 +77,7 @@ def set_owner_patch(owner: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
 
 class WorkspaceRecipe(Recipe):
     type = "workspace"
+    params_model = WorkspaceParams
 
     def build(self, params: WorkspaceParams) -> Playbook:
         inputs_path = f"stacks/workspaces/{params.name}/inputs.yaml"

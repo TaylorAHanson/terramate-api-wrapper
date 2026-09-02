@@ -60,6 +60,8 @@ resources:
             value: "${resources.database_instances.provisioning_db.name}"
           - name: GITHUB_PAT
             valueFrom: github-pat
+          - name: GITHUB_REPO
+            value: "${var.github_repo}"
 
 variables:
   app_name:
@@ -71,6 +73,13 @@ variables:
   secret_scope:
     description: "Databricks secret scope holding the GitHub service-account PAT"
     default: "terramate-api-wrapper"
+  github_repo:
+    description: >-
+      "owner/name" of the Terramate repo RealGitHubClient opens PRs against
+      (server.github_client, #22). Points at the throwaway fixture repo
+      (fixtures/terraform-fixture-repo) until Phase 2's cutover to the real
+      Terramate repo (architecture.md §3.1).
+    default: "TaylorAHanson/terramate-fixture-repo"
 
 targets:
   dev:
