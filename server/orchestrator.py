@@ -30,7 +30,7 @@ import logging
 import os
 import socket
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable, Sequence
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -38,7 +38,7 @@ from sqlalchemy.orm import Session
 from server.config import get_settings
 from server.github_client import GitHubClient
 from server.models import Output, ProvisioningRequest, Step
-from server.recipes.framework import AddFile, EditFile, FileEdit
+from server.recipes.framework import AddFile, EditFile, FileEdit, StepSpec
 from server.recipes.registry import RECIPES
 
 logger = logging.getLogger(__name__)
@@ -127,6 +127,21 @@ def _claim_and_open_next(session: Session, github_client: GitHubClient) -> bool:
         step.claimed_by,
     )
 
+    spec = _build_step_spec(step)
+    try:
+        _run_hooks(spec.preflight, step, "preflight")
+    except Exception:
+        logger.exception(
+            "step_preflight_failed request_id=%s step=%s ordinal=%s",
+            step.request_id,
+            step.key,
+            step.ordinal,
+        )
+        _transition(step, "plan_failed")
+        _roll_up_request(session, step.request_id)
+        session.commit()
+        return True
+
     body = (
         f"Automated by the provisioning API for step `{step.key}` "
         f"of request `{step.request_id}`."
@@ -192,20 +207,40 @@ def _resolve_consumes(session: Session, step: Step) -> list[tuple[dict, Any]]:
     return resolved
 
 
-def _resolve_edits(step: Step, resolved: list[tuple[dict, Any]]) -> list[FileEdit]:
-    """Rebuild the Step's `bundle_edits` from its Recipe (§15.1) and substitute
-    each `${steps.<key>.outputs.<name>}` placeholder (already resolved above)
-    with its real value, so the real GitHubClient commits actual apply-derived
-    content rather than the placeholder token (#22 — this was previously only
-    a PR-body stand-in, see #20).
+def _build_step_spec(step: Step) -> StepSpec:
+    """Rebuild the Step's `StepSpec` from its Recipe (§15.1) and persisted
+    `params` — including its `preflight`/`postflight` hook callables, which
+    are never persisted themselves (they can't be: they're code, not data),
+    so the engine re-derives them here rather than storing them.
 
-    Recipes are pure functions of `params` (persisted on the request), so
-    rebuilding here reproduces the exact same StepSpec that was built at
-    request-creation time — nothing here is re-decided.
+    Recipes are pure functions of `params`, so rebuilding here reproduces the
+    exact same StepSpec that was built at request-creation time — nothing
+    here is re-decided.
     """
     recipe = RECIPES[step.request.type]
     playbook = recipe.build_from_params_dict(step.request.params)
-    spec = next(s for s in playbook.steps if s.key == step.key)
+    return next(s for s in playbook.steps if s.key == step.key)
+
+
+def _run_hooks(hooks: Sequence[Callable[[], None]], step: Step, hook_name: str) -> None:
+    for hook in hooks:
+        logger.debug(
+            "step_hook_invoked request_id=%s step=%s ordinal=%s hook=%s",
+            step.request_id,
+            step.key,
+            step.ordinal,
+            hook_name,
+        )
+        hook()
+
+
+def _resolve_edits(step: Step, resolved: list[tuple[dict, Any]]) -> list[FileEdit]:
+    """Substitute each `${steps.<key>.outputs.<name>}` placeholder (already
+    resolved above) with its real value, so the real GitHubClient commits
+    actual apply-derived content rather than the placeholder token (#22 —
+    this was previously only a PR-body stand-in, see #20).
+    """
+    spec = _build_step_spec(step)
     substitutions = {
         f"${{steps.{ref['step_key']}.outputs.{ref['output_name']}}}": value for ref, value in resolved
     }
@@ -258,7 +293,10 @@ def _advance_awaiting_approval(session: Session, github_client: GitHubClient) ->
             continue
         pr_status = github_client.get_pull_request_status(step.pr_number)
         if pr_status.merged:
-            next_status = "applied" if _produced_outputs_present(session, step) else "applying"
+            if _produced_outputs_present(session, step):
+                _transition_to_applied(session, step)
+                continue
+            next_status = "applying"
         elif pr_status.closed:
             next_status = "rejected"
             logger.warning(
@@ -285,9 +323,33 @@ def _advance_applying(session: Session) -> None:
     steps = session.scalars(select(Step).where(Step.status == "applying")).all()
     for step in steps:
         if _produced_outputs_present(session, step):
-            _transition(step, "applied")
-            _roll_up_request(session, step.request_id)
+            _transition_to_applied(session, step)
     session.commit()
+
+
+def _transition_to_applied(session: Session, step: Step) -> None:
+    """Run this Step's postflight hooks and land it at `applied` — or, if a
+    hook raises, at `apply_failed`. The single site both `merged` collapse
+    paths funnel through (an immediate merged->applied in `_advance_awaiting_
+    approval` for a Step with no Outputs to wait on, and a delayed one via
+    `_advance_applying` once its Outputs land) so postflight always runs
+    exactly once, right after the Step's apply-derived Outputs (if any) have
+    landed.
+    """
+    spec = _build_step_spec(step)
+    try:
+        _run_hooks(spec.postflight, step, "postflight")
+    except Exception:
+        logger.exception(
+            "step_postflight_failed request_id=%s step=%s ordinal=%s",
+            step.request_id,
+            step.key,
+            step.ordinal,
+        )
+        _transition(step, "apply_failed")
+    else:
+        _transition(step, "applied")
+    _roll_up_request(session, step.request_id)
 
 
 def _flag_stuck_steps(session: Session, stuck_threshold_seconds: float | None) -> None:
