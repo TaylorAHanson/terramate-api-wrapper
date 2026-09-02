@@ -1,6 +1,6 @@
 """`POST /v1/requests`, `GET /v1/requests/{id}`,
-`GET /v1/requests/{id}/steps/{n}/plan`, and `POST /v1/requests/{id}/cancel`
-(architecture.md §5, §6, §11).
+`GET /v1/requests/{id}/steps/{n}`, `GET /v1/requests/{id}/steps/{n}/plan`, and
+`POST /v1/requests/{id}/cancel` (architecture.md §5, §6, §11).
 
 `POST` checks the intake gate (`server.intake_gate`, #21) is open, validates
 the body against its type's discriminated-union member (published in
@@ -81,6 +81,20 @@ class RequestDetailResponse(BaseModel):
     steps: list[StepOut]
 
 
+def _step_to_out(step: Step) -> StepOut:
+    return StepOut(
+        ordinal=step.ordinal,
+        key=step.key,
+        status=step.status,
+        pr_number=step.pr_number,
+        pr_url=step.pr_url,
+        plan_ref=step.plan_ref,
+        depends_on=step.depends_on,
+        stuck=step.stuck,
+        status_changed_at=step.status_changed_at,
+    )
+
+
 def _to_response(request_row: ProvisioningRequest) -> RequestDetailResponse:
     return RequestDetailResponse(
         id=request_row.id,
@@ -91,20 +105,7 @@ def _to_response(request_row: ProvisioningRequest) -> RequestDetailResponse:
         status=request_row.status,
         created_at=request_row.created_at,
         updated_at=request_row.updated_at,
-        steps=[
-            StepOut(
-                ordinal=s.ordinal,
-                key=s.key,
-                status=s.status,
-                pr_number=s.pr_number,
-                pr_url=s.pr_url,
-                plan_ref=s.plan_ref,
-                depends_on=s.depends_on,
-                stuck=s.stuck,
-                status_changed_at=s.status_changed_at,
-            )
-            for s in request_row.steps
-        ],
+        steps=[_step_to_out(s) for s in request_row.steps],
     )
 
 
@@ -202,6 +203,20 @@ def get_request(request_id: str, session: Session = Depends(get_db)) -> RequestD
     return _to_response(request_row)
 
 
+def _find_step(session: Session, request_id: str, ordinal: int) -> Step | None:
+    return session.scalars(
+        select(Step).where(Step.request_id == request_id, Step.ordinal == ordinal)
+    ).first()
+
+
+@router.get("/v1/requests/{request_id}/steps/{ordinal}", response_model=StepOut)
+def get_step(request_id: str, ordinal: int, session: Session = Depends(get_db)) -> StepOut:
+    step = _find_step(session, request_id, ordinal)
+    if step is None:
+        raise HTTPException(status_code=404, detail="Step not found")
+    return _step_to_out(step)
+
+
 class StepPlanResponse(BaseModel):
     ordinal: int
     key: str
@@ -213,9 +228,7 @@ class StepPlanResponse(BaseModel):
 def get_step_plan(
     request_id: str, ordinal: int, session: Session = Depends(get_db)
 ) -> StepPlanResponse:
-    step = session.scalars(
-        select(Step).where(Step.request_id == request_id, Step.ordinal == ordinal)
-    ).first()
+    step = _find_step(session, request_id, ordinal)
     if step is None:
         raise HTTPException(status_code=404, detail="Step not found")
     if step.plan_ref is None:
