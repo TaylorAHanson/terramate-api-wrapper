@@ -33,8 +33,19 @@ npm run dev
 
 ## Tests
 
-Point `DATABASE_URL` at a real Postgres — Seam 1 runs against a real test
-Lakebase, not a mock (see `tests/conftest.py`):
+```
+pytest
+```
+
+No Docker, service container, or system Postgres needed — the test session
+boots its own ephemeral embedded Postgres (real PostgreSQL, bundled binaries)
+against a temp data dir, applies the Alembic migrations to it, and tears it
+down at the end (see `tests/conftest.py`). Seam 1 still runs against a real
+test Lakebase, not a mock, and the reconcile-loop tests still exercise real
+`FOR UPDATE SKIP LOCKED` row-locking semantics.
+
+To run against your own Postgres instead, set `DATABASE_URL` explicitly — it
+always takes precedence:
 
 ```
 DATABASE_URL=postgresql+psycopg2://postgres:postgres@localhost:5432/terramate_test pytest
