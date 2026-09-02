@@ -12,24 +12,30 @@ durable state in Lakebase (managed Postgres), migrated with Alembic
 
 ## Local development
 
-Backend:
-
 ```
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements-dev.txt
-docker run -d --name terramate-pg -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
-  -e POSTGRES_DB=terramate_dev -p 5432:5432 postgres:16-alpine
-DATABASE_URL=postgresql+psycopg2://postgres:postgres@localhost:5432/terramate_dev alembic upgrade head
-DATABASE_URL=postgresql+psycopg2://postgres:postgres@localhost:5432/terramate_dev uvicorn server.main:app --reload
+./dev.sh
 ```
 
-Frontend:
+That's it — no Docker and no system-installed Postgres required. `dev.sh`
+creates a virtualenv, installs Python deps, boots a bundled embedded Postgres
+(real PostgreSQL binaries, shipped via the `pgserver` package, persisted in
+the gitignored `.pgdata/` dir so it survives restarts), applies
+`alembic upgrade head`, then starts the FastAPI backend (`:8000`) and the
+Vite frontend (`:5173`, installing `frontend/node_modules` on first run).
+
+Pass `--debug` to start the backend under `debugpy` on port 5678.
+
+Bring your own Postgres instead by setting `DATABASE_URL` in `.env` (copied
+from `.env.example` on first run) — `dev.sh` uses it as-is and skips the
+embedded Postgres:
 
 ```
-cd frontend
-npm install
-npm run dev
+DATABASE_URL=postgresql+psycopg2://postgres:postgres@localhost:5432/terramate_dev ./dev.sh
 ```
+
+The deployed Databricks App path is unaffected either way: with
+`DATABASE_URL` unset and `LAKEBASE_INSTANCE_NAME` set, the app authenticates
+to Lakebase via OAuth instead (see `server/database.py`).
 
 ## Tests
 
