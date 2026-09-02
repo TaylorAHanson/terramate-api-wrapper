@@ -37,6 +37,12 @@ class Settings:
     pg_user: str | None
     lakebase_instance_name: str | None
 
+    # How often the in-process reconcile driver (server.scheduler, #39) calls
+    # orchestrator.tick(). The driver only starts when a real GitHubClient can
+    # be built (GITHUB_PAT + GITHUB_REPO); locally/in tests it stays off, so
+    # this value is unused there.
+    reconcile_interval_seconds: float
+
 
 def get_settings() -> Settings:
     return Settings(
@@ -49,4 +55,5 @@ def get_settings() -> Settings:
         pg_database=os.environ.get("PGDATABASE"),
         pg_user=os.environ.get("PGUSER"),
         lakebase_instance_name=os.environ.get("LAKEBASE_INSTANCE_NAME"),
+        reconcile_interval_seconds=float(os.environ.get("RECONCILE_INTERVAL_SECONDS", "15")),
     )
