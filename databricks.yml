@@ -72,6 +72,11 @@ resources:
           # surface the per-call GitHub transport lines.
           - name: LOG_LEVEL
             value: "INFO"
+          # How long (seconds) a Step may sit at `applying` waiting on its
+          # Action's output write before the reconcile loop flags it `stuck`
+          # and logs a warning. Optional; the app defaults to 3600 (1h).
+          - name: STEP_STUCK_THRESHOLD_SECONDS
+            value: "3600"
 
 variables:
   app_name:

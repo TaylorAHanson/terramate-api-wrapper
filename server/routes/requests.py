@@ -61,6 +61,12 @@ class StepOut(BaseModel):
     pr_url: str | None
     plan_ref: str | None
     depends_on: list[str]
+    # Stuck-surfacing (#43): `stuck` is true while this Step has been held at
+    # `applying` past the threshold (its Action never wrote the ADR-0002
+    # outputs), so an operator sees it here without needing log access;
+    # `status_changed_at` is when it entered its current status.
+    stuck: bool
+    status_changed_at: datetime
 
 
 class RequestDetailResponse(BaseModel):
@@ -94,6 +100,8 @@ def _to_response(request_row: ProvisioningRequest) -> RequestDetailResponse:
                 pr_url=s.pr_url,
                 plan_ref=s.plan_ref,
                 depends_on=s.depends_on,
+                stuck=s.stuck,
+                status_changed_at=s.status_changed_at,
             )
             for s in request_row.steps
         ],

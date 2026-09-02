@@ -20,6 +20,11 @@ export interface Step {
   pr_url: string | null;
   plan_ref: string | null;
   depends_on: string[];
+  // #43: true while held at `applying` past the stuck threshold (its Action
+  // never wrote the ADR-0002 outputs); status_changed_at is when it entered
+  // its current status.
+  stuck: boolean;
+  status_changed_at: string;
 }
 
 export interface RequestDetail {
