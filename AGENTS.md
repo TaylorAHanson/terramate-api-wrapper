@@ -129,11 +129,24 @@ DATABASE_URL=postgresql+psycopg2://postgres:postgres@localhost:5432/terramate_te
   `tests/seam2_recipes/golden_harness.py`. Set `UPDATE_GOLDEN=1` when
   re-running to intentionally regenerate a golden file after a deliberate
   Recipe change.
+- `tests/unit/` — fast, no-DB unit tests below the HTTP boundary (e.g.
+  `RealGitHubClient`'s request-building, the orchestrator's bundle-edit
+  substitution logic).
+- `tests/seam3_fixture_e2e/` — **Seam 3**: proves the real `GitHubClient`
+  (`server.github_client.RealGitHubClient`) end to end — PR → merge → apply
+  → Lakebase output-write → poll — against a real, throwaway GitHub repo
+  (`fixtures/terraform-fixture-repo/`). It drives real GitHub Actions runs,
+  so a bare `pytest` **never** picks it up (`pyproject.toml`'s
+  `addopts = "-m 'not seam3e2e'"`); it needs its own env vars and an explicit
+  `pytest -m seam3e2e` — see `tests/seam3_fixture_e2e/conftest.py` and the
+  "Seam 3" section of `README.md` for the exact invocation. You will not run
+  this in ordinary dev-loop or CI usage.
 - `tests/test_database.py`, `tests/test_embedded_postgres.py` — infrastructure
   tests for the embedded-Postgres bootstrap itself.
 
 Run a single file or test the normal pytest way, e.g.
-`pytest tests/seam2_recipes/test_workspace_recipe.py -v`.
+`pytest tests/seam2_recipes/test_workspace_recipe.py -v`. A bare `pytest`
+runs Seam 1, Seam 2, and `tests/unit/`, but never Seam 3.
 
 ### Typecheck / build
 
@@ -154,9 +167,13 @@ server/
   github_client.py  The GitHub API client (faked in Seam 1 tests)
 frontend/        React + TypeScript app (Vite)
 migrations/      Alembic environment + versioned revisions
+fixtures/        The throwaway terraform-fixture-repo Seam 3 drives, + the
+                 script that pushes it to its own GitHub repo
 tests/
   seam1_api/     Seam 1 (real HTTP + real test Lakebase, GitHub faked)
   seam2_recipes/ Seam 2 (pure Recipe golden-file tests)
+  seam3_fixture_e2e/  Seam 3 (real GitHubClient against the real fixture repo, opt-in only)
+  unit/          Fast no-DB unit tests below the HTTP boundary
 docs/adr/        Accepted architectural decisions
 CONTEXT.md       Domain glossary (source of truth for terminology)
 architecture.md  Fuller original design proposal (ADRs supersede it on conflicts)
@@ -174,7 +191,10 @@ This is the main extension point. To add Type `foo`:
    - A Pydantic `FooProvisioningRequest` model with
      `type: Literal["foo"]` and `params: FooParams` — this is the
      request-envelope member for this Type.
-   - A `FooRecipe(Recipe)` class with `type = "foo"` and a
+   - A `FooRecipe(Recipe)` class with `type = "foo"`, `params_model =
+     FooParams` (the orchestrator uses this to rebuild the exact same
+     Playbook from a persisted request's `params` dict at claim time — see
+     `Recipe.build_from_params_dict` in `server/recipes/framework.py`), and a
      `build(self, params: FooParams) -> Playbook` method that returns a
      `Playbook` of one or more `StepSpec`s (see `server/recipes/framework.py`
      for `StepSpec`, `AddFile`, `EditFile`, `OutputRef`). Bundle edits are
