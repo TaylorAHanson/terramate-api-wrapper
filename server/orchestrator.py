@@ -8,13 +8,13 @@ check whether any merged Step's apply-derived Outputs have landed yet, then
 claim and open PRs for every currently-runnable queued Step — in that order,
 so a Step that just became runnable this pass is claimed the same tick.
 
-v1 still collapses `pr_open`/`planning`/`planned` into one reconcile pass,
-ending at `awaiting_approval` — there is no persisted state for "PR open,
-plan not back yet." Against the real fixture repo (#22) that collapse is
-absorbed by `RealGitHubClient.get_plan` itself, which blocks (bounded, with
-a timeout) until the real `terraform-plan` check run lands, rather than the
-orchestrator polling across ticks — un-collapsing these into their own
-tracked sub-states remains future work (see #19).
+v1 still collapses `planning`/`planned` into `pr_open`'s wait for the plan —
+`pr_open` is the persisted "PR open, plan not back yet" sub-state #19 flagged
+as future work, added by #45 so a Step whose plan is slow to land no longer
+blocks the tick from claiming and opening PRs for other runnable Steps.
+`_advance_pr_open` re-checks `GitHubClient.get_plan` once per tick (never
+blocking — see server/github_client.py) until it succeeds, then the Step
+moves to `awaiting_approval`.
 
 `merged` -> `applying` -> `applied` does **not** collapse the same way for a
 Step with apply-derived Outputs (#20): a merged Step is held at `applying`
@@ -36,7 +36,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from server.config import get_settings
-from server.github_client import GitHubClient
+from server.github_client import GitHubClient, PlanNotReadyError, correlate
 from server.models import Output, ProvisioningRequest, Step
 from server.recipes.framework import AddFile, EditFile, FileEdit
 from server.recipes.registry import RECIPES
@@ -87,6 +87,7 @@ def tick(session: Session, github_client: GitHubClient, stuck_threshold_seconds:
     _advance_applying(session)
     while _claim_and_open_next(session, github_client):
         pass
+    _advance_pr_open(session, github_client)
     _flag_stuck_steps(session, stuck_threshold_seconds)
 
 
@@ -139,13 +140,14 @@ def _claim_and_open_next(session: Session, github_client: GitHubClient) -> bool:
         )
         body += f"\n\nResolved inputs:\n{lines}"
 
-    pr = github_client.open_pull_request(
-        branch_name=f"provision/{step.request_id}/{step.key}",
-        base_branch="main",
-        title=f"{step.request.type}: {step.key}",
-        body=body,
-        edits=_resolve_edits(step, resolved),
-    )
+    with correlate(request_id=step.request_id, step_key=step.key, ordinal=step.ordinal):
+        pr = github_client.open_pull_request(
+            branch_name=f"provision/{step.request_id}/{step.key}",
+            base_branch="main",
+            title=f"{step.request.type}: {step.key}",
+            body=body,
+            edits=_resolve_edits(step, resolved),
+        )
     step.pr_number = pr.number
     step.pr_url = pr.url
     logger.info(
@@ -156,8 +158,12 @@ def _claim_and_open_next(session: Session, github_client: GitHubClient) -> bool:
         pr.number,
         pr.url,
     )
-    step.plan_ref = github_client.get_plan(pr.number)
-    _transition(step, "awaiting_approval")
+    # The plan wait is deliberately *not* done here (#45) — `get_plan` never
+    # blocks, but this Step's plan may still not be back yet, and a
+    # single `while _claim_and_open_next(): pass` pass must be able to move on
+    # to the next runnable queued Step regardless. `_advance_pr_open` is what
+    # picks this Step back up, this same tick and every tick after.
+    _transition(step, "pr_open")
 
     _roll_up_request(session, step.request_id)
     session.commit()
@@ -251,12 +257,34 @@ def _produced_outputs_present(session: Session, step: Step) -> bool:
     return set(captured_keys) == set(step.produces)
 
 
+def _advance_pr_open(session: Session, github_client: GitHubClient) -> None:
+    """Re-check each PR-open Step's plan, one non-blocking attempt per tick
+    (#45) — `PlanNotReadyError` just means "still not back, try again next
+    tick," so one stalled Step is skipped rather than stalling the loop for
+    every other PR-open Step this same tick.
+    """
+    steps = session.scalars(select(Step).where(Step.status == "pr_open")).all()
+    for step in steps:
+        if step.request.status in TERMINAL_REQUEST_STATUSES:
+            continue
+        try:
+            with correlate(request_id=step.request_id, step_key=step.key, ordinal=step.ordinal):
+                plan = github_client.get_plan(step.pr_number)
+        except PlanNotReadyError:
+            continue
+        step.plan_ref = plan
+        _transition(step, "awaiting_approval")
+        _roll_up_request(session, step.request_id)
+    session.commit()
+
+
 def _advance_awaiting_approval(session: Session, github_client: GitHubClient) -> None:
     steps = session.scalars(select(Step).where(Step.status == "awaiting_approval")).all()
     for step in steps:
         if step.request.status in TERMINAL_REQUEST_STATUSES:
             continue
-        pr_status = github_client.get_pull_request_status(step.pr_number)
+        with correlate(request_id=step.request_id, step_key=step.key, ordinal=step.ordinal):
+            pr_status = github_client.get_pull_request_status(step.pr_number)
         if pr_status.merged:
             next_status = "applied" if _produced_outputs_present(session, step) else "applying"
         elif pr_status.closed:

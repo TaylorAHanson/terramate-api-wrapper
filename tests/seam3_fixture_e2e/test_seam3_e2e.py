@@ -90,7 +90,9 @@ def test_schema_request_reaches_succeeded_through_the_real_loop(seam3_db_session
         lambda d: _step(d, "add-schema")["status"] == "awaiting_approval",
     )
     step = _step(detail, "add-schema")
-    assert step["plan_ref"]  # RealGitHubClient.get_plan blocked until the real check run landed
+    # `_tick_until` re-polled across ticks (#45) until `_advance_pr_open` saw
+    # the real check run land and moved the Step past `pr_open`.
+    assert step["plan_ref"]
 
     _merge(step["pr_number"])
 
