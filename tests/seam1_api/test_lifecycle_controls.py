@@ -17,6 +17,8 @@ from tests.seam1_api.fakes import FakeGitHubClient
 
 client = TestClient(app)
 
+_ADMIN_HEADERS = {"X-Forwarded-Email": "admin-tester@example.com"}
+
 
 @pytest.fixture(autouse=True)
 def _clean_slate():
@@ -40,9 +42,9 @@ def _reset_intake_gate():
     """The intake gate is a single row shared across the whole test suite
     (and other local runs against the same Postgres) — always leave it open.
     """
-    client.post("/v1/admin/intake-gate", json={"enabled": True})
+    client.post("/v1/admin/intake-gate", json={"enabled": True}, headers=_ADMIN_HEADERS)
     yield
-    client.post("/v1/admin/intake-gate", json={"enabled": True})
+    client.post("/v1/admin/intake-gate", json={"enabled": True}, headers=_ADMIN_HEADERS)
 
 
 def _idempotency_key() -> str:
@@ -50,7 +52,7 @@ def _idempotency_key() -> str:
 
 
 def _headers(idempotency_key: str, requester: str = "svc-tester") -> dict[str, str]:
-    return {"Idempotency-Key": idempotency_key, "X-Requester": requester}
+    return {"Idempotency-Key": idempotency_key, "X-Forwarded-Email": requester}
 
 
 def _create_schema_request(name: str) -> str:
@@ -200,7 +202,7 @@ def test_a_rejected_step_halts_the_request_without_rolling_back_or_advancing_sib
 
 
 def test_intake_gate_defaults_to_open():
-    response = client.get("/v1/admin/intake-gate")
+    response = client.get("/v1/admin/intake-gate", headers=_ADMIN_HEADERS)
     assert response.status_code == 200
     assert response.json()["enabled"] is True
 
@@ -211,7 +213,7 @@ def test_closing_the_intake_gate_rejects_new_requests_but_lets_in_flight_work_dr
     orchestrator.tick(db_session, fake)
     pr_number = _get_request(in_flight_request_id)["steps"][0]["pr_number"]
 
-    close = client.post("/v1/admin/intake-gate", json={"enabled": False})
+    close = client.post("/v1/admin/intake-gate", json={"enabled": False}, headers=_ADMIN_HEADERS)
     assert close.status_code == 200
     assert close.json()["enabled"] is False
 
@@ -227,7 +229,7 @@ def test_closing_the_intake_gate_rejects_new_requests_but_lets_in_flight_work_dr
     orchestrator.tick(db_session, fake)
     assert _get_request(in_flight_request_id)["status"] == "succeeded"
 
-    reopen = client.post("/v1/admin/intake-gate", json={"enabled": True})
+    reopen = client.post("/v1/admin/intake-gate", json={"enabled": True}, headers=_ADMIN_HEADERS)
     assert reopen.status_code == 200
     assert reopen.json()["enabled"] is True
 
@@ -245,7 +247,7 @@ def test_idempotency_replay_succeeds_even_while_the_gate_is_closed():
     first = client.post("/v1/requests", headers=_headers(key), json=payload)
     assert first.status_code == 202
 
-    client.post("/v1/admin/intake-gate", json={"enabled": False})
+    client.post("/v1/admin/intake-gate", json={"enabled": False}, headers=_ADMIN_HEADERS)
 
     second = client.post("/v1/requests", headers=_headers(key), json=payload)
     assert second.status_code == 202

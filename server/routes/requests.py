@@ -26,6 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from server.auth import resolve_requester
 from server.database import get_db
 from server.intake_gate import get_gate
 from server.models import ProvisioningRequest, Step
@@ -120,8 +121,9 @@ def create_request(
     body: ProvisioningRequestBody,
     idempotency_key: str = Header(alias="Idempotency-Key"),
     # The self-service caller's identity, recorded for audit (architecture.md
-    # §10). A placeholder until real M2M auth context is wired up (fog).
-    requester: str = Header(alias="X-Requester"),
+    # §10) — resolved from the trusted Databricks Apps forwarded identity,
+    # never from a client-controlled header (#47).
+    requester: str = Depends(resolve_requester),
     session: Session = Depends(get_db),
 ) -> CreateRequestResponse:
     existing = _find_by_idempotency_key(session, idempotency_key)

@@ -1,7 +1,8 @@
 """`GET`/`POST /v1/admin/intake-gate` — the global off-switch (architecture.md
-§3.1, §10, #21). No admin auth model exists yet (caller-level authorization
-is fog for v1, architecture.md §10); this is the observability + control seam
-the off-switch decision calls for.
+§3.1, §10, #21). Full caller-level authorization is still fog for v1
+(architecture.md §10), but reading/flipping the off-switch itself is gated:
+both routes require a trusted forwarded identity on the `ADMIN_PRINCIPALS`
+allowlist (server.auth, #47).
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from server.auth import require_admin
 from server.database import get_db
 from server.intake_gate import get_gate
 
@@ -30,19 +32,23 @@ class SetIntakeGateRequest(BaseModel):
 
 
 @router.get("/v1/admin/intake-gate", response_model=IntakeGateResponse)
-def read_intake_gate(session: Session = Depends(get_db)) -> IntakeGateResponse:
+def read_intake_gate(
+    session: Session = Depends(get_db), principal: str = Depends(require_admin)
+) -> IntakeGateResponse:
     gate = get_gate(session)
     return IntakeGateResponse(enabled=gate.enabled, updated_at=gate.updated_at)
 
 
 @router.post("/v1/admin/intake-gate", response_model=IntakeGateResponse)
 def set_intake_gate(
-    body: SetIntakeGateRequest, session: Session = Depends(get_db)
+    body: SetIntakeGateRequest,
+    session: Session = Depends(get_db),
+    principal: str = Depends(require_admin),
 ) -> IntakeGateResponse:
     gate = get_gate(session)
     previous = gate.enabled
     gate.enabled = body.enabled
     gate.updated_at = datetime.now(timezone.utc)
     session.commit()
-    logger.info("intake_gate_set from=%s to=%s", previous, gate.enabled)
+    logger.info("intake_gate_set from=%s to=%s by=%s", previous, gate.enabled, principal)
     return IntakeGateResponse(enabled=gate.enabled, updated_at=gate.updated_at)

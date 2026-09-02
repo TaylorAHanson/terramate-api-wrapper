@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .venv/
+.venv312/
 venv/
 .env
 *.egg-info/

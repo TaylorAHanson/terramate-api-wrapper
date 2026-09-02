@@ -30,7 +30,7 @@ _TICK_INTERVAL_SECONDS = 5
 
 
 def _headers() -> dict[str, str]:
-    return {"Idempotency-Key": str(uuid.uuid4()), "X-Requester": "seam3-tester"}
+    return {"Idempotency-Key": str(uuid.uuid4()), "X-Forwarded-Email": "seam3-tester"}
 
 
 def _get_request(request_id: str) -> dict:

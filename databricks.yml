@@ -77,6 +77,12 @@ resources:
           # and logs a warning. Optional; the app defaults to 3600 (1h).
           - name: STEP_STUCK_THRESHOLD_SECONDS
             value: "3600"
+          # Forwarded identities (X-Forwarded-Email / X-Forwarded-User,
+          # server/auth.py, #47) allowed to read/flip the intake off-switch.
+          # Comma-separated; empty (the default) means nobody is authorized
+          # until an operator sets this per target.
+          - name: ADMIN_PRINCIPALS
+            value: "${var.admin_principals}"
 
 variables:
   app_name:
@@ -95,6 +101,13 @@ variables:
       (fixtures/terraform-fixture-repo) until Phase 2's cutover to the real
       Terramate repo (architecture.md §3.1).
     default: "TaylorAHanson/terramate-fixture-repo"
+  admin_principals:
+    description: >-
+      Comma-separated forwarded identities (X-Forwarded-Email /
+      X-Forwarded-User) authorized to read/flip the intake off-switch
+      (server/auth.py, #47). Empty means nobody is authorized — set per
+      target once the operator's identity is known.
+    default: ""
 
 targets:
   dev:
