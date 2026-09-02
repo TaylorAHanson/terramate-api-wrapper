@@ -1,0 +1,75 @@
+name: Terraform plan/apply (Seam 3 fixture)
+
+# The provisioning API (terramate-api-wrapper) never runs Terraform itself
+# (architecture.md §2) — this repo's own Actions do, exactly as they would
+# for a real Terramate repo. `plan` proves the API can read back a real
+# `terraform plan` via a check run (RealGitHubClient.get_plan); `apply`
+# proves a merged Step's outputs land in Lakebase (ADR-0002), which is what
+# unblocks a dependent Step's PR (server.orchestrator._advance_applying).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: read
+
+jobs:
+  plan:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform init -input=false
+      - run: terraform plan -input=false -no-color -out=plan.tfplan
+      - run: terraform show -no-color plan.tfplan > plan.txt
+      - name: Publish plan as a check run
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const text = fs.readFileSync('plan.txt', 'utf8').slice(0, 65000);
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'terraform-plan',
+              head_sha: context.payload.pull_request.head.sha,
+              status: 'completed',
+              conclusion: 'success',
+              output: { title: 'Terraform Plan', summary: 'Plan complete.', text },
+            });
+
+  apply:
+    # Triggered on PR close (not `push` to main) so this job has the merged
+    # PR's own `head.ref` directly — the only place the Step's branch name
+    # (`provision/<request_id>/<step_key>`, see server.orchestrator) survives
+    # a merge — without having to parse a merge-commit message.
+    if: github.event.action == 'closed' && github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - run: terraform init -input=false
+      - run: terraform apply -input=false -auto-approve -no-color
+      - name: Write outputs to Lakebase (ADR-0002)
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          DATABASE_URL: ${{ secrets.SEAM3_DATABASE_URL }}
+          DATABRICKS_HOST: ${{ secrets.SEAM3_DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.SEAM3_DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.SEAM3_DATABRICKS_CLIENT_SECRET }}
+          LAKEBASE_INSTANCE_NAME: ${{ secrets.SEAM3_LAKEBASE_INSTANCE_NAME }}
+          PGHOST: ${{ secrets.SEAM3_PGHOST }}
+          PGPORT: ${{ secrets.SEAM3_PGPORT }}
+          PGDATABASE: ${{ secrets.SEAM3_PGDATABASE }}
+          PGUSER: ${{ secrets.SEAM3_PGUSER }}
+        run: python scripts/write_output.py

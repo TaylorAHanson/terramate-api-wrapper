@@ -16,6 +16,10 @@ from dataclasses import dataclass
 class Settings:
     app_environment: str
     github_pat: str | None
+    # "owner/name" of the Terramate repo `RealGitHubClient` opens PRs against
+    # (see server.github_client, #22). Unset locally/in Seam 1-2 tests, which
+    # never construct a real client.
+    github_repo: str | None
 
     # Local/dev/test override: a full SQLAlchemy connection string to a plain
     # Postgres instance. When set, `server.database` skips the Lakebase OAuth
@@ -38,6 +42,7 @@ def get_settings() -> Settings:
     return Settings(
         app_environment=os.environ.get("APP_ENVIRONMENT", "local"),
         github_pat=os.environ.get("GITHUB_PAT") or None,
+        github_repo=os.environ.get("GITHUB_REPO") or None,
         database_url=os.environ.get("DATABASE_URL") or None,
         pg_host=os.environ.get("PGHOST"),
         pg_port=os.environ.get("PGPORT"),

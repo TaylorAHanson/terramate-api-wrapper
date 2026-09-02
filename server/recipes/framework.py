@@ -13,6 +13,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
+from pydantic import BaseModel
+
 
 @dataclass(frozen=True)
 class AddFile:
@@ -70,6 +72,14 @@ class Recipe(ABC):
     """The per-type tribal knowledge, expressed as imperative code (ADR-0001)."""
 
     type: str
+    # The Pydantic model `params` validates against — lets the orchestrator
+    # rebuild a request's Playbook from its persisted `params` dict (#22) at
+    # claim time, to get real bundle_edits content, without every call site
+    # needing to know each type's concrete params class.
+    params_model: type[BaseModel]
 
     @abstractmethod
     def build(self, params: Any) -> Playbook: ...
+
+    def build_from_params_dict(self, raw_params: dict[str, Any]) -> Playbook:
+        return self.build(self.params_model.model_validate(raw_params))

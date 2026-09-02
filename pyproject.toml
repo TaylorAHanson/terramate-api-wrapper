@@ -1,3 +1,12 @@
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+# Seam 3 (#22) drives the real GitHub API against a live fixture repo and
+# takes real wall-clock minutes (Actions runs) — opt in explicitly with
+# `pytest -m seam3e2e` (each test also self-skips if its own env vars aren't
+# set; see tests/seam3_fixture_e2e/conftest.py), never picked up by a bare
+# `pytest`.
+addopts = "-m 'not seam3e2e'"
+markers = [
+    "seam3e2e: live, gated end-to-end test against the real GitHub fixture repo (#22)",
+]
