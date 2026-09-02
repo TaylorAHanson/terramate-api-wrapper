@@ -10,6 +10,10 @@ Databricks App: FastAPI backend (`server/`) + React frontend (`frontend/`),
 durable state in Lakebase (managed Postgres), migrated with Alembic
 (`migrations/`).
 
+See [`AGENTS.md`](./AGENTS.md) for the full operating guide — orientation,
+the dev loop and Seam test model, adding a new resource Type, changing the
+schema, and the contribution flow.
+
 ## Local development
 
 ```
