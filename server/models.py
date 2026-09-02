@@ -66,6 +66,13 @@ class Step(Base):
     claimed_by: Mapped[str | None]
     # Reserved seam, #10 — the future per-Step locking model.
     lock_token: Mapped[str | None]
+    # Stuck-surfacing (#43): `status_changed_at` is when this Step entered its
+    # current status (updated on every transition — `updated_at` isn't
+    # `onupdate`-maintained), and `stuck` is the log-once flag the reconcile
+    # loop raises when a Step is held at `applying` past the threshold and
+    # clears on the next transition.
+    status_changed_at: Mapped[datetime] = _server_now()
+    stuck: Mapped[bool] = mapped_column(server_default=func.false())
     created_at: Mapped[datetime] = _server_now()
     updated_at: Mapped[datetime] = _server_now()
 
