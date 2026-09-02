@@ -28,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 
 from server.config import get_settings
 from server.github_client import GitHubClient, RealGitHubClient
+from server.logging_config import configure_logging
 from server.routes import admin, health, requests
 from server.scheduler import reconcile_loop
 
@@ -50,6 +51,8 @@ def _build_reconcile_client() -> GitHubClient | None:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
+    configure_logging(settings.log_level)
+    logger.info("app_startup environment=%s log_level=%s", settings.app_environment, settings.log_level)
     client = _build_reconcile_client()
     task: asyncio.Task | None = None
     if client is not None:

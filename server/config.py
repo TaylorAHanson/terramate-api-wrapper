@@ -43,6 +43,11 @@ class Settings:
     # this value is unused there.
     reconcile_interval_seconds: float
 
+    # Root log level for the app's `server.*` loggers (server.logging_config,
+    # #41). `INFO` surfaces state transitions and PR opens; `DEBUG` additionally
+    # surfaces the per-call GitHub transport lines.
+    log_level: str
+
 
 def get_settings() -> Settings:
     return Settings(
@@ -56,4 +61,5 @@ def get_settings() -> Settings:
         pg_user=os.environ.get("PGUSER"),
         lakebase_instance_name=os.environ.get("LAKEBASE_INSTANCE_NAME"),
         reconcile_interval_seconds=float(os.environ.get("RECONCILE_INTERVAL_SECONDS", "15")),
+        log_level=os.environ.get("LOG_LEVEL", "INFO"),
     )

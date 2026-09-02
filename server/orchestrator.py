@@ -26,6 +26,7 @@ Outputs to wait on still collapses straight to `applied` on merge.
 """
 from __future__ import annotations
 
+import logging
 import os
 import socket
 from datetime import datetime, timezone
@@ -39,6 +40,8 @@ from server.models import Output, ProvisioningRequest, Step
 from server.recipes.framework import AddFile, EditFile, FileEdit
 from server.recipes.registry import RECIPES
 
+logger = logging.getLogger(__name__)
+
 _FAILED_STEP_STATUSES = {"plan_failed", "apply_failed", "rejected"}
 
 # A request halted here (failed, by a Step; cancelled, by an operator) never
@@ -46,6 +49,21 @@ _FAILED_STEP_STATUSES = {"plan_failed", "apply_failed", "rejected"}
 # claimed or advanced further, even a queued Step with no dependency relation
 # to whatever halted the request (#21).
 TERMINAL_REQUEST_STATUSES = {"succeeded", "failed", "cancelled"}
+
+
+def _log_transition(step: Step, from_status: str, to_status: str) -> None:
+    """Emit the one canonical `step_transition` line every status change logs,
+    so a deployed operator can grep a single event name to trace a Step's whole
+    lifecycle. Correlating ids (`request_id`, step `key`/`ordinal`) are on every
+    line (#41)."""
+    logger.info(
+        "step_transition request_id=%s step=%s ordinal=%s from=%s to=%s",
+        step.request_id,
+        step.key,
+        step.ordinal,
+        from_status,
+        to_status,
+    )
 
 
 def tick(session: Session, github_client: GitHubClient) -> None:
@@ -85,6 +103,13 @@ def _claim_and_open_next(session: Session, github_client: GitHubClient) -> bool:
 
     step.claimed_at = datetime.now(timezone.utc)
     step.claimed_by = f"{socket.gethostname()}:{os.getpid()}"
+    logger.debug(
+        "step_claimed request_id=%s step=%s ordinal=%s claimed_by=%s",
+        step.request_id,
+        step.key,
+        step.ordinal,
+        step.claimed_by,
+    )
 
     body = (
         f"Automated by the provisioning API for step `{step.key}` "
@@ -107,8 +132,17 @@ def _claim_and_open_next(session: Session, github_client: GitHubClient) -> bool:
     )
     step.pr_number = pr.number
     step.pr_url = pr.url
+    logger.info(
+        "pr_opened request_id=%s step=%s ordinal=%s pr_number=%s pr_url=%s",
+        step.request_id,
+        step.key,
+        step.ordinal,
+        pr.number,
+        pr.url,
+    )
     step.plan_ref = github_client.get_plan(pr.number)
     step.status = "awaiting_approval"
+    _log_transition(step, "queued", "awaiting_approval")
 
     _roll_up_request(session, step.request_id)
     session.commit()
@@ -212,8 +246,16 @@ def _advance_awaiting_approval(session: Session, github_client: GitHubClient) ->
             step.status = "applied" if _produced_outputs_present(session, step) else "applying"
         elif pr_status.closed:
             step.status = "rejected"
+            logger.warning(
+                "step_rejected request_id=%s step=%s ordinal=%s pr_number=%s (PR closed unmerged)",
+                step.request_id,
+                step.key,
+                step.ordinal,
+                step.pr_number,
+            )
         else:
             continue
+        _log_transition(step, "awaiting_approval", step.status)
         _roll_up_request(session, step.request_id)
     session.commit()
 
@@ -229,6 +271,7 @@ def _advance_applying(session: Session) -> None:
     for step in steps:
         if _produced_outputs_present(session, step):
             step.status = "applied"
+            _log_transition(step, "applying", "applied")
             _roll_up_request(session, step.request_id)
     session.commit()
 
@@ -240,6 +283,7 @@ def _roll_up_request(session: Session, request_id: str) -> None:
         # the way the other rollup outcomes below are, so it's not
         # recomputed away.
         return
+    previous = request.status
     steps = request.steps
     if any(s.status in _FAILED_STEP_STATUSES for s in steps):
         request.status = "failed"
@@ -249,3 +293,11 @@ def _roll_up_request(session: Session, request_id: str) -> None:
         request.status = "awaiting_approval"
     else:
         request.status = "in_progress"
+
+    if request.status != previous:
+        logger.info(
+            "request_rollup request_id=%s from=%s to=%s",
+            request_id,
+            previous,
+            request.status,
+        )

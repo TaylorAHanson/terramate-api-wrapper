@@ -15,6 +15,7 @@ a request the same way a failed Step does.
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime
 from typing import Annotated, Union
@@ -32,6 +33,8 @@ from server.orchestrator import TERMINAL_REQUEST_STATUSES
 from server.recipes.registry import RECIPES
 from server.recipes.schema import SchemaProvisioningRequest
 from server.recipes.workspace import WorkspaceProvisioningRequest
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -114,9 +117,16 @@ def create_request(
 ) -> CreateRequestResponse:
     existing = _find_by_idempotency_key(session, idempotency_key)
     if existing is not None:
+        logger.info(
+            "request_idempotent_replay request_id=%s type=%s status=%s",
+            existing.id,
+            existing.type,
+            existing.status,
+        )
         return CreateRequestResponse(request_id=existing.id, status=existing.status)
 
     if not get_gate(session).enabled:
+        logger.warning("request_rejected reason=intake_gate_closed type=%s requester=%s", body.type, requester)
         raise HTTPException(status_code=503, detail="Intake is currently disabled")
 
     recipe = RECIPES[body.type]
@@ -166,6 +176,13 @@ def create_request(
             raise
         return CreateRequestResponse(request_id=existing.id, status=existing.status)
 
+    logger.info(
+        "request_created request_id=%s type=%s requester=%s steps=%s",
+        request_row.id,
+        request_row.type,
+        requester,
+        len(playbook.steps),
+    )
     return CreateRequestResponse(request_id=request_row.id, status=request_row.status)
 
 
@@ -223,6 +240,8 @@ def cancel_request(request_id: str, session: Session = Depends(get_db)) -> Cance
         raise HTTPException(
             status_code=409, detail=f"Request already reached a terminal state: {request_row.status}"
         )
+    previous = request_row.status
     request_row.status = "cancelled"
     session.commit()
+    logger.info("request_cancelled request_id=%s from=%s", request_row.id, previous)
     return CancelRequestResponse(request_id=request_row.id, status=request_row.status)

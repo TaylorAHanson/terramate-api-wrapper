@@ -5,6 +5,7 @@ the off-switch decision calls for.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends
@@ -13,6 +14,8 @@ from sqlalchemy.orm import Session
 
 from server.database import get_db
 from server.intake_gate import get_gate
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -37,7 +40,9 @@ def set_intake_gate(
     body: SetIntakeGateRequest, session: Session = Depends(get_db)
 ) -> IntakeGateResponse:
     gate = get_gate(session)
+    previous = gate.enabled
     gate.enabled = body.enabled
     gate.updated_at = datetime.now(timezone.utc)
     session.commit()
+    logger.info("intake_gate_set from=%s to=%s", previous, gate.enabled)
     return IntakeGateResponse(enabled=gate.enabled, updated_at=gate.updated_at)
