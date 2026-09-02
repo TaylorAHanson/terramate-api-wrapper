@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Sequence
 
-from server.github_client import GitHubClient, PullRequestRef, PullRequestStatus
+from server.github_client import GitHubClient, PlanNotReadyError, PullRequestRef, PullRequestStatus
 from server.recipes.framework import FileEdit
 
 
@@ -32,6 +32,10 @@ class FakeGitHubClient(GitHubClient):
     opened_pull_requests: list[OpenedPullRequest] = field(default_factory=list)
     merged_pr_numbers: set[int] = field(default_factory=set)
     closed_unmerged_pr_numbers: set[int] = field(default_factory=set)
+    # A PR number in here makes `get_plan` raise `PlanNotReadyError` instead of
+    # returning instantly, simulating a real plan check run that hasn't
+    # completed yet (#45's "one stalled plan doesn't block another Step").
+    stalled_plan_pr_numbers: set[int] = field(default_factory=set)
 
     def open_pull_request(
         self,
@@ -56,6 +60,8 @@ class FakeGitHubClient(GitHubClient):
         return PullRequestStatus(merged=merged, closed=closed)
 
     def get_plan(self, pr_number: int) -> str:
+        if pr_number in self.stalled_plan_pr_numbers:
+            raise PlanNotReadyError(f"plan for PR #{pr_number} stalled by test fake")
         pr = self.opened_pull_requests[pr_number - 1]
         return (
             f"Terraform will perform the following actions:\n\n"

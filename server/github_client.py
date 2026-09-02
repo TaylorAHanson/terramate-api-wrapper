@@ -13,14 +13,27 @@ resource and the `terraform plan` text from a `terraform-plan` check run the
 fixture repo's Actions workflow publishes (see
 `fixtures/terraform-fixture-repo/.github/workflows/terraform.yml`) — never
 Terraform state, never a run log.
+
+Two resilience properties (#45, a #38 child):
+
+- `get_plan` makes a single, immediate check for the `terraform-plan` check
+  run rather than blocking/sleeping until one lands — `PlanNotReadyError`
+  just means "not yet", and it's the *orchestrator*'s job (`_advance_pr_open`)
+  to re-check on a later tick, so one Step's slow plan never stalls the tick
+  that would otherwise claim and open PRs for other runnable Steps.
+- The transport (`_get`/`_post`) retries a transient GitHub `5xx`/`429` with
+  backoff (honoring `Retry-After` when GitHub sends it) before surfacing it as
+  a failure; a non-transient `4xx` is never retried.
 """
 from __future__ import annotations
 
 import base64
+import contextvars
 import logging
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Protocol, Sequence
+from typing import Any, Iterator, Protocol, Sequence
 
 import httpx
 import yaml
@@ -28,6 +41,30 @@ import yaml
 from server.recipes.framework import AddFile, EditFile, FileEdit
 
 logger = logging.getLogger(__name__)
+
+# Correlating ids (request_id, step key/ordinal — #41's convention) for the
+# transport-level retry/give-up log lines below, which otherwise have no way
+# to know which Step's GitHub call they're retrying: the orchestrator sets
+# this around each `GitHubClient` call it makes, scoped to that call only.
+_correlation: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
+    "github_client_correlation", default={}
+)
+
+
+@contextmanager
+def correlate(*, request_id: str, step_key: str, ordinal: int) -> Iterator[None]:
+    token = _correlation.set({"request_id": request_id, "step": step_key, "ordinal": ordinal})
+    try:
+        yield
+    finally:
+        _correlation.reset(token)
+
+
+def _correlation_suffix() -> str:
+    ctx = _correlation.get()
+    if not ctx:
+        return ""
+    return " " + " ".join(f"{k}={v}" for k, v in ctx.items())
 
 
 @dataclass(frozen=True)
@@ -82,12 +119,12 @@ class RealGitHubClient:
     repo: str
     token: str
     base_url: str = "https://api.github.com"
-    # Bounded wait for the fixture repo's Actions plan job to publish the
-    # `terraform-plan` check run (architecture.md §14: v1 has no live
-    # check-polling loop yet, so this client absorbs the wait itself rather
-    # than the orchestrator un-collapsing pr_open/planning/planned — see #19).
-    plan_poll_timeout_seconds: float = 300.0
-    plan_poll_interval_seconds: float = 5.0
+    # Bounded retry for a transient GitHub 5xx/429 (#45) — a non-transient 4xx
+    # is never retried. `retry_backoff_max_seconds` caps exponential backoff;
+    # a `Retry-After` header (e.g. on 429) always wins over it when present.
+    max_retries: int = 4
+    retry_backoff_base_seconds: float = 1.0
+    retry_backoff_max_seconds: float = 30.0
     _client: httpx.Client = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -197,7 +234,12 @@ class RealGitHubClient:
         return PullRequestStatus(merged=merged, closed=closed)
 
     def get_plan(self, pr_number: int) -> str:
-        """Block until the fixture repo's plan check run reports a result.
+        """Check once for the fixture repo's plan check run — never blocks.
+
+        `PlanNotReadyError` means "not yet, try again on a later tick": the
+        orchestrator's `_advance_pr_open` is what re-checks across ticks (#45),
+        so a Step whose plan is slow to land never stalls the tick that opened
+        its PR, and never stalls any other Step's tick.
 
         Never reads Terraform state or a run log (ADR-0002) — only the
         `terraform-plan` check run's `output.text` the Actions workflow
@@ -205,38 +247,22 @@ class RealGitHubClient:
         """
         pr = self._get(f"/repos/{self.repo}/pulls/{pr_number}")
         head_sha = pr["head"]["sha"]
-        logger.info(
-            "github_plan_poll_start repo=%s pr_number=%s head_sha=%s timeout=%.1fs",
+        run = self._find_plan_check_run(head_sha)
+        if run is not None and run.get("status") == "completed":
+            logger.info(
+                "github_plan_ready repo=%s pr_number=%s head_sha=%s",
+                self.repo,
+                pr_number,
+                head_sha,
+            )
+            return (run.get("output") or {}).get("text") or ""
+        logger.debug(
+            "github_plan_not_ready repo=%s pr_number=%s head_sha=%s",
             self.repo,
             pr_number,
             head_sha,
-            self.plan_poll_timeout_seconds,
         )
-
-        deadline = time.monotonic() + self.plan_poll_timeout_seconds
-        while True:
-            run = self._find_plan_check_run(head_sha)
-            if run is not None and run.get("status") == "completed":
-                logger.info(
-                    "github_plan_poll_complete repo=%s pr_number=%s head_sha=%s",
-                    self.repo,
-                    pr_number,
-                    head_sha,
-                )
-                return (run.get("output") or {}).get("text") or ""
-            if time.monotonic() >= deadline:
-                logger.warning(
-                    "github_plan_poll_timeout repo=%s pr_number=%s head_sha=%s timeout=%.1fs",
-                    self.repo,
-                    pr_number,
-                    head_sha,
-                    self.plan_poll_timeout_seconds,
-                )
-                raise PlanNotReadyError(
-                    f"No completed '{_PLAN_CHECK_RUN_NAME}' check run for PR #{pr_number} "
-                    f"after {self.plan_poll_timeout_seconds}s"
-                )
-            time.sleep(self.plan_poll_interval_seconds)
+        raise PlanNotReadyError(f"No completed '{_PLAN_CHECK_RUN_NAME}' check run yet for PR #{pr_number}")
 
     def _find_plan_check_run(self, head_sha: str) -> dict | None:
         runs = self._get(f"/repos/{self.repo}/commits/{head_sha}/check-runs")["check_runs"]
@@ -245,16 +271,60 @@ class RealGitHubClient:
     # -- transport -----------------------------------------------------
 
     def _get(self, path: str) -> dict:
-        logger.debug("github_call method=GET path=%s", path)
-        response = self._client.get(path)
-        _raise_for_status(response)
-        return response.json()
+        return self._request("GET", path)
 
     def _post(self, path: str, json_body: dict) -> dict:
-        logger.debug("github_call method=POST path=%s", path)
-        response = self._client.post(path, json=json_body)
-        _raise_for_status(response)
-        return response.json()
+        return self._request("POST", path, json_body)
+
+    def _request(self, method: str, path: str, json_body: dict | None = None) -> dict:
+        attempt = 1
+        while True:
+            logger.debug("github_call method=%s path=%s attempt=%s", method, path, attempt)
+            response = self._client.request(method, path, json=json_body)
+            if not response.is_error:
+                return response.json()
+            if not _is_transient(response.status_code) or attempt > self.max_retries:
+                if attempt > 1:
+                    logger.error(
+                        "github_retry_exhausted method=%s url=%s status=%s attempts=%s%s",
+                        response.request.method,
+                        response.request.url,
+                        response.status_code,
+                        attempt,
+                        _correlation_suffix(),
+                    )
+                _raise_for_status(response)
+            delay = _retry_delay(response, attempt, self.retry_backoff_base_seconds, self.retry_backoff_max_seconds)
+            logger.warning(
+                "github_retry method=%s url=%s status=%s attempt=%s delay=%.2fs%s",
+                response.request.method,
+                response.request.url,
+                response.status_code,
+                attempt,
+                delay,
+                _correlation_suffix(),
+            )
+            time.sleep(delay)
+            attempt += 1
+
+
+_TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
+
+
+def _is_transient(status_code: int) -> bool:
+    return status_code in _TRANSIENT_STATUS_CODES
+
+
+def _retry_delay(response: httpx.Response, attempt: int, base_seconds: float, max_seconds: float) -> float:
+    """`Retry-After` (GitHub sends it on `429`s, always as a second count for
+    this API) wins when present; otherwise a capped exponential backoff."""
+    retry_after = response.headers.get("Retry-After")
+    if retry_after is not None:
+        try:
+            return float(retry_after)
+        except ValueError:
+            pass
+    return min(base_seconds * (2 ** (attempt - 1)), max_seconds)
 
 
 def _raise_for_status(response: httpx.Response) -> None:

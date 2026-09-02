@@ -107,6 +107,33 @@ def test_tick_after_a_faked_rejection_fails_the_request(db_session):
     assert detail["steps"][0]["status"] == "rejected"
 
 
+def test_a_stalled_plan_does_not_block_a_second_runnable_step_from_being_claimed_and_advanced(db_session):
+    """(#45) `get_plan` never blocks the tick — a Step stuck at `pr_open`
+    because its plan check run hasn't landed must not stop a second, unrelated
+    queued Step from being claimed, opened, and (if its own plan is ready)
+    walked all the way to `awaiting_approval` in that same tick.
+    """
+    stalled_request_id = _create_schema_request("cobalt")
+    fake = FakeGitHubClient()
+    fake.stalled_plan_pr_numbers.add(1)  # the PR about to be opened for the stalled request
+
+    orchestrator.tick(db_session, fake)
+
+    stalled_step = _get_request(stalled_request_id)["steps"][0]
+    assert stalled_step["status"] == "pr_open"
+    assert stalled_step["pr_number"] == 1
+
+    unblocked_request_id = _create_schema_request("nickel")
+    orchestrator.tick(db_session, fake)
+
+    stalled_step = _get_request(stalled_request_id)["steps"][0]
+    assert stalled_step["status"] == "pr_open", "still stalled — unrelated to the second step's progress"
+
+    unblocked_step = _get_request(unblocked_request_id)["steps"][0]
+    assert unblocked_step["status"] == "awaiting_approval"
+    assert unblocked_step["pr_number"] == 2
+
+
 def test_a_stalled_claim_is_resumed_on_a_later_tick(db_session):
     """A crash between claiming a Step and finishing the reconcile pass leaves
     the Step's claimed_at/claimed_by set but its status still `queued` — the

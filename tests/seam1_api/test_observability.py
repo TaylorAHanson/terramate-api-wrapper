@@ -61,6 +61,10 @@ def _events_for(caplog, request_id: str) -> list[str]:
 
 
 def test_opening_a_pr_logs_pr_opened_and_the_queued_to_awaiting_transition(db_session, caplog):
+    """(#45) `queued` now passes through the persisted `pr_open` sub-state on
+    its way to `awaiting_approval` — both `step_transition` lines are logged,
+    even though a fake's instant `get_plan` walks through both in one tick.
+    """
     request_id = _create_schema_request("bronze")
     fake = FakeGitHubClient()
 
@@ -69,7 +73,8 @@ def test_opening_a_pr_logs_pr_opened_and_the_queued_to_awaiting_transition(db_se
 
     messages = _events_for(caplog, request_id)
     assert any(m.startswith("pr_opened") and "pr_number=1" in m for m in messages)
-    assert any(m.startswith("step_transition") and "from=queued to=awaiting_approval" in m for m in messages)
+    assert any(m.startswith("step_transition") and "from=queued to=pr_open" in m for m in messages)
+    assert any(m.startswith("step_transition") and "from=pr_open to=awaiting_approval" in m for m in messages)
     assert any(m.startswith("request_rollup") and "to=awaiting_approval" in m for m in messages)
 
 
