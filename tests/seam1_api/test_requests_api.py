@@ -18,7 +18,7 @@ def _idempotency_key() -> str:
 
 
 def _headers(idempotency_key: str, requester: str = "svc-tester") -> dict[str, str]:
-    return {"Idempotency-Key": idempotency_key, "X-Requester": requester}
+    return {"Idempotency-Key": idempotency_key, "X-Forwarded-Email": requester}
 
 
 def test_openapi_publishes_the_schema_type_params_without_a_types_endpoint():

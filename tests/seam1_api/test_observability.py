@@ -43,7 +43,7 @@ def _clean_slate():
 def _create_schema_request(name: str) -> str:
     response = client.post(
         "/v1/requests",
-        headers={"Idempotency-Key": str(uuid.uuid4()), "X-Requester": "svc-tester"},
+        headers={"Idempotency-Key": str(uuid.uuid4()), "X-Forwarded-Email": "svc-tester"},
         json={"type": "schema", "params": {"catalog": "research", "name": name, "owner": "data-eng"}},
     )
     assert response.status_code == 202
@@ -120,9 +120,10 @@ def test_create_and_cancel_log_request_lifecycle(caplog):
 
 
 def test_flipping_the_intake_gate_is_logged(caplog):
+    admin_headers = {"X-Forwarded-Email": "admin-tester@example.com"}
     with caplog.at_level(logging.INFO, logger="server.routes.admin"):
-        client.post("/v1/admin/intake-gate", json={"enabled": False})
-        client.post("/v1/admin/intake-gate", json={"enabled": True})
+        client.post("/v1/admin/intake-gate", json={"enabled": False}, headers=admin_headers)
+        client.post("/v1/admin/intake-gate", json={"enabled": True}, headers=admin_headers)
 
     messages = [r.message for r in caplog.records if r.name == "server.routes.admin"]
     assert any(m.startswith("intake_gate_set") and "to=False" in m for m in messages)

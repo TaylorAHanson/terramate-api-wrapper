@@ -54,6 +54,12 @@ class Settings:
     # slow apply doesn't false-positive.
     step_stuck_threshold_seconds: float
 
+    # The forwarded identities (Databricks Apps `X-Forwarded-Email` /
+    # `X-Forwarded-User`, see server.auth, #47) allowed to read/flip the
+    # global intake off-switch. Comma-separated; empty means nobody is
+    # authorized, which is the safe default until an operator sets it.
+    admin_principals: frozenset[str]
+
 
 def get_settings() -> Settings:
     return Settings(
@@ -69,4 +75,7 @@ def get_settings() -> Settings:
         reconcile_interval_seconds=float(os.environ.get("RECONCILE_INTERVAL_SECONDS", "15")),
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         step_stuck_threshold_seconds=float(os.environ.get("STEP_STUCK_THRESHOLD_SECONDS", "3600")),
+        admin_principals=frozenset(
+            p.strip() for p in os.environ.get("ADMIN_PRINCIPALS", "").split(",") if p.strip()
+        ),
     )
