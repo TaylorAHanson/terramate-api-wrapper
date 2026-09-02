@@ -48,6 +48,12 @@ class Settings:
     # surfaces the per-call GitHub transport lines.
     log_level: str
 
+    # How long a Step may sit at `applying` (waiting on its Action's ADR-0002
+    # output write) before the reconcile loop flags it `stuck` and logs a
+    # warning (server.orchestrator, #43). Conservative by default so a merely-
+    # slow apply doesn't false-positive.
+    step_stuck_threshold_seconds: float
+
 
 def get_settings() -> Settings:
     return Settings(
@@ -62,4 +68,5 @@ def get_settings() -> Settings:
         lakebase_instance_name=os.environ.get("LAKEBASE_INSTANCE_NAME"),
         reconcile_interval_seconds=float(os.environ.get("RECONCILE_INTERVAL_SECONDS", "15")),
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
+        step_stuck_threshold_seconds=float(os.environ.get("STEP_STUCK_THRESHOLD_SECONDS", "3600")),
     )

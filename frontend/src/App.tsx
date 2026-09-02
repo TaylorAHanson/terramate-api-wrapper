@@ -182,7 +182,15 @@ function StepRow({ requestId, step }: { requestId: string; step: Step }) {
       <tr>
         <td>{step.ordinal}</td>
         <td>{step.key}</td>
-        <td>{step.status}</td>
+        <td>
+          {step.status}
+          {step.stuck && (
+            <span role="alert" title="Held at applying past the threshold — the apply Action never wrote its outputs (#43)">
+              {" "}
+              ⚠ stuck
+            </span>
+          )}
+        </td>
         <td>
           {step.pr_url ? (
             <a href={step.pr_url} target="_blank" rel="noreferrer">

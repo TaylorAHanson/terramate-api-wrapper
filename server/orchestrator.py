@@ -29,12 +29,13 @@ from __future__ import annotations
 import logging
 import os
 import socket
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from server.config import get_settings
 from server.github_client import GitHubClient
 from server.models import Output, ProvisioningRequest, Step
 from server.recipes.framework import AddFile, EditFile, FileEdit
@@ -51,11 +52,20 @@ _FAILED_STEP_STATUSES = {"plan_failed", "apply_failed", "rejected"}
 TERMINAL_REQUEST_STATUSES = {"succeeded", "failed", "cancelled"}
 
 
-def _log_transition(step: Step, from_status: str, to_status: str) -> None:
-    """Emit the one canonical `step_transition` line every status change logs,
-    so a deployed operator can grep a single event name to trace a Step's whole
+def _transition(step: Step, to_status: str) -> None:
+    """The single path every Step status change goes through.
+
+    Records `status_changed_at` (so the stuck check knows how long a Step has
+    been held — see `_flag_stuck_steps`), clears any `stuck` flag (a Step that
+    moved is no longer stuck in its old state, #43), and emits the one canonical
+    `step_transition` line an operator can grep to trace a Step's whole
     lifecycle. Correlating ids (`request_id`, step `key`/`ordinal`) are on every
-    line (#41)."""
+    line (#41). Mutates the Step in place; the caller commits.
+    """
+    from_status = step.status
+    step.status = to_status
+    step.status_changed_at = datetime.now(timezone.utc)
+    step.stuck = False
     logger.info(
         "step_transition request_id=%s step=%s ordinal=%s from=%s to=%s",
         step.request_id,
@@ -66,12 +76,18 @@ def _log_transition(step: Step, from_status: str, to_status: str) -> None:
     )
 
 
-def tick(session: Session, github_client: GitHubClient) -> None:
-    """Advance every in-flight Step by one reconciliation pass."""
+def tick(session: Session, github_client: GitHubClient, stuck_threshold_seconds: float | None = None) -> None:
+    """Advance every in-flight Step by one reconciliation pass.
+
+    `stuck_threshold_seconds` overrides the configured
+    `STEP_STUCK_THRESHOLD_SECONDS` (tests pass it to drive stuck detection
+    deterministically); `None` reads it from settings.
+    """
     _advance_awaiting_approval(session, github_client)
     _advance_applying(session)
     while _claim_and_open_next(session, github_client):
         pass
+    _flag_stuck_steps(session, stuck_threshold_seconds)
 
 
 def _claim_and_open_next(session: Session, github_client: GitHubClient) -> bool:
@@ -141,8 +157,7 @@ def _claim_and_open_next(session: Session, github_client: GitHubClient) -> bool:
         pr.url,
     )
     step.plan_ref = github_client.get_plan(pr.number)
-    step.status = "awaiting_approval"
-    _log_transition(step, "queued", "awaiting_approval")
+    _transition(step, "awaiting_approval")
 
     _roll_up_request(session, step.request_id)
     session.commit()
@@ -243,9 +258,9 @@ def _advance_awaiting_approval(session: Session, github_client: GitHubClient) ->
             continue
         pr_status = github_client.get_pull_request_status(step.pr_number)
         if pr_status.merged:
-            step.status = "applied" if _produced_outputs_present(session, step) else "applying"
+            next_status = "applied" if _produced_outputs_present(session, step) else "applying"
         elif pr_status.closed:
-            step.status = "rejected"
+            next_status = "rejected"
             logger.warning(
                 "step_rejected request_id=%s step=%s ordinal=%s pr_number=%s (PR closed unmerged)",
                 step.request_id,
@@ -255,7 +270,7 @@ def _advance_awaiting_approval(session: Session, github_client: GitHubClient) ->
             )
         else:
             continue
-        _log_transition(step, "awaiting_approval", step.status)
+        _transition(step, next_status)
         _roll_up_request(session, step.request_id)
     session.commit()
 
@@ -270,10 +285,53 @@ def _advance_applying(session: Session) -> None:
     steps = session.scalars(select(Step).where(Step.status == "applying")).all()
     for step in steps:
         if _produced_outputs_present(session, step):
-            step.status = "applied"
-            _log_transition(step, "applying", "applied")
+            _transition(step, "applied")
             _roll_up_request(session, step.request_id)
     session.commit()
+
+
+def _flag_stuck_steps(session: Session, stuck_threshold_seconds: float | None) -> None:
+    """Flag any Step held at `applying` past the threshold (architecture.md §14).
+
+    A merged Step with apply-derived Outputs waits at `applying` for its Action
+    to write them (ADR-0002); if the Action never does, the Step is stuck
+    forever and nothing tells the human. Set `stuck` (queryable via the API,
+    alertable via the log) the first tick a Step crosses the threshold, and log
+    a single WARNING then — the `Step.stuck == False` guard is what keeps the
+    ~15s driver from re-logging it every pass. `_transition` clears the flag if
+    the outputs later arrive, so it never goes stale.
+    """
+    threshold = (
+        stuck_threshold_seconds
+        if stuck_threshold_seconds is not None
+        else get_settings().step_stuck_threshold_seconds
+    )
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=threshold)
+    candidates = session.scalars(
+        select(Step).where(
+            Step.status == "applying",
+            Step.stuck.is_(False),
+            Step.status_changed_at < cutoff,
+        )
+    ).all()
+    # A Step left at `applying` under a halted request (an operator cancel, or
+    # a sibling Step's failure — #21) isn't "stuck holding for a human": the
+    # request already stopped and the operator knows, so flagging it would be
+    # noise. Only Steps of a still-live request are surfaced.
+    newly_stuck = [s for s in candidates if s.request.status not in TERMINAL_REQUEST_STATUSES]
+    for step in newly_stuck:
+        step.stuck = True
+        held_for = datetime.now(timezone.utc) - step.status_changed_at
+        logger.warning(
+            "step_stuck request_id=%s step=%s ordinal=%s status=applying held_for=%.0fs "
+            "(no ADR-0002 output write; holding for a human)",
+            step.request_id,
+            step.key,
+            step.ordinal,
+            held_for.total_seconds(),
+        )
+    if newly_stuck:
+        session.commit()
 
 
 def _roll_up_request(session: Session, request_id: str) -> None:
