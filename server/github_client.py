@@ -17,6 +17,7 @@ Terraform state, never a run log.
 from __future__ import annotations
 
 import base64
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Protocol, Sequence
@@ -25,6 +26,8 @@ import httpx
 import yaml
 
 from server.recipes.framework import AddFile, EditFile, FileEdit
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -154,6 +157,13 @@ class RealGitHubClient:
             f"/repos/{self.repo}/pulls",
             {"title": title, "head": branch_name, "base": base_branch, "body": body},
         )
+        logger.info(
+            "github_pr_opened repo=%s branch=%s pr_number=%s pr_url=%s",
+            self.repo,
+            branch_name,
+            pr["number"],
+            pr["html_url"],
+        )
         return PullRequestRef(number=pr["number"], url=pr["html_url"])
 
     def _render_content(self, edit: FileEdit, base_branch: str) -> str:
@@ -195,13 +205,33 @@ class RealGitHubClient:
         """
         pr = self._get(f"/repos/{self.repo}/pulls/{pr_number}")
         head_sha = pr["head"]["sha"]
+        logger.info(
+            "github_plan_poll_start repo=%s pr_number=%s head_sha=%s timeout=%.1fs",
+            self.repo,
+            pr_number,
+            head_sha,
+            self.plan_poll_timeout_seconds,
+        )
 
         deadline = time.monotonic() + self.plan_poll_timeout_seconds
         while True:
             run = self._find_plan_check_run(head_sha)
             if run is not None and run.get("status") == "completed":
+                logger.info(
+                    "github_plan_poll_complete repo=%s pr_number=%s head_sha=%s",
+                    self.repo,
+                    pr_number,
+                    head_sha,
+                )
                 return (run.get("output") or {}).get("text") or ""
             if time.monotonic() >= deadline:
+                logger.warning(
+                    "github_plan_poll_timeout repo=%s pr_number=%s head_sha=%s timeout=%.1fs",
+                    self.repo,
+                    pr_number,
+                    head_sha,
+                    self.plan_poll_timeout_seconds,
+                )
                 raise PlanNotReadyError(
                     f"No completed '{_PLAN_CHECK_RUN_NAME}' check run for PR #{pr_number} "
                     f"after {self.plan_poll_timeout_seconds}s"
@@ -215,11 +245,13 @@ class RealGitHubClient:
     # -- transport -----------------------------------------------------
 
     def _get(self, path: str) -> dict:
+        logger.debug("github_call method=GET path=%s", path)
         response = self._client.get(path)
         _raise_for_status(response)
         return response.json()
 
     def _post(self, path: str, json_body: dict) -> dict:
+        logger.debug("github_call method=POST path=%s", path)
         response = self._client.post(path, json=json_body)
         _raise_for_status(response)
         return response.json()
@@ -227,6 +259,15 @@ class RealGitHubClient:
 
 def _raise_for_status(response: httpx.Response) -> None:
     if response.is_error:
+        # The GitHub token lives in the Authorization header, which is never
+        # part of the request URL or the response text — so nothing logged here
+        # leaks it (#41).
+        logger.error(
+            "github_call_failed method=%s url=%s status=%s",
+            response.request.method,
+            response.request.url,
+            response.status_code,
+        )
         raise GitHubClientError(
             f"{response.request.method} {response.request.url} -> {response.status_code}: {response.text}"
         )

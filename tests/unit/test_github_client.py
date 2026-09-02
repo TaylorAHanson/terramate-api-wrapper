@@ -4,6 +4,7 @@ against a mocked GitHub API (respx) — no real network, no real repo.
 from __future__ import annotations
 
 import base64
+import logging
 
 import httpx
 import pytest
@@ -14,6 +15,7 @@ from server.recipes.framework import AddFile, EditFile
 
 REPO = "acme/fixture-repo"
 BASE_URL = "https://api.github.com"
+TOKEN = "ghp_supersecrettoken"
 
 
 @pytest.fixture()
@@ -213,3 +215,85 @@ def test_a_failed_github_call_raises_github_client_error(client):
     )
     with pytest.raises(GitHubClientError):
         client.open_pull_request(branch_name="b", base_branch="main", title="t", body="body")
+
+
+# -- observability (#41) --------------------------------------------------
+
+
+@respx.mock
+def test_a_failed_call_is_logged_at_error_without_leaking_the_token(caplog):
+    """Every failure logs a `github_call_failed` line, and the PAT (which lives
+    only in the Authorization header) must never appear in any log record."""
+    secret_client = RealGitHubClient(repo=REPO, token=TOKEN, base_url=BASE_URL)
+    respx.get(f"{BASE_URL}/repos/{REPO}/git/ref/heads/main").mock(
+        return_value=httpx.Response(500, text="boom")
+    )
+    try:
+        with caplog.at_level(logging.DEBUG, logger="server.github_client"):
+            with pytest.raises(GitHubClientError):
+                secret_client.open_pull_request(branch_name="b", base_branch="main", title="t", body="body")
+    finally:
+        secret_client.close()
+
+    assert any(r.message.startswith("github_call_failed") and r.levelno == logging.ERROR for r in caplog.records)
+    assert TOKEN not in caplog.text
+
+
+@respx.mock
+def test_open_pull_request_logs_the_opened_pr(client, caplog):
+    respx.get(f"{BASE_URL}/repos/{REPO}/git/ref/heads/main").mock(
+        return_value=httpx.Response(200, json={"object": {"sha": "base-commit-sha"}})
+    )
+    respx.get(f"{BASE_URL}/repos/{REPO}/git/commits/base-commit-sha").mock(
+        return_value=httpx.Response(200, json={"tree": {"sha": "base-tree-sha"}})
+    )
+    respx.post(f"{BASE_URL}/repos/{REPO}/git/trees").mock(return_value=httpx.Response(201, json={"sha": "t"}))
+    respx.post(f"{BASE_URL}/repos/{REPO}/git/commits").mock(return_value=httpx.Response(201, json={"sha": "c"}))
+    respx.post(f"{BASE_URL}/repos/{REPO}/git/refs").mock(return_value=httpx.Response(201, json={}))
+    respx.post(f"{BASE_URL}/repos/{REPO}/pulls").mock(
+        return_value=httpx.Response(201, json={"number": 7, "html_url": f"https://github.com/{REPO}/pull/7"})
+    )
+
+    with caplog.at_level(logging.INFO, logger="server.github_client"):
+        client.open_pull_request(branch_name="provision/req-1/create", base_branch="main", title="t", body="b")
+
+    opened = [r.message for r in caplog.records if r.message.startswith("github_pr_opened")]
+    assert opened and "pr_number=7" in opened[0]
+
+
+@respx.mock
+def test_get_plan_logs_poll_start_and_completion(client, caplog):
+    respx.get(f"{BASE_URL}/repos/{REPO}/pulls/9").mock(
+        return_value=httpx.Response(200, json={"head": {"sha": "head-sha"}})
+    )
+    respx.get(f"{BASE_URL}/repos/{REPO}/commits/head-sha/check-runs").mock(
+        return_value=httpx.Response(
+            200,
+            json={"check_runs": [{"name": "terraform-plan", "status": "completed", "output": {"text": "ok"}}]},
+        )
+    )
+
+    with caplog.at_level(logging.INFO, logger="server.github_client"):
+        client.get_plan(9)
+
+    events = {r.message.split()[0] for r in caplog.records}
+    assert "github_plan_poll_start" in events
+    assert "github_plan_poll_complete" in events
+
+
+@respx.mock
+def test_get_plan_logs_a_timeout_warning(client, caplog):
+    client.plan_poll_timeout_seconds = 0.05
+    client.plan_poll_interval_seconds = 0.01
+    respx.get(f"{BASE_URL}/repos/{REPO}/pulls/9").mock(
+        return_value=httpx.Response(200, json={"head": {"sha": "head-sha"}})
+    )
+    respx.get(f"{BASE_URL}/repos/{REPO}/commits/head-sha/check-runs").mock(
+        return_value=httpx.Response(200, json={"check_runs": []})
+    )
+
+    with caplog.at_level(logging.WARNING, logger="server.github_client"):
+        with pytest.raises(PlanNotReadyError):
+            client.get_plan(9)
+
+    assert any(r.message.startswith("github_plan_poll_timeout") for r in caplog.records)

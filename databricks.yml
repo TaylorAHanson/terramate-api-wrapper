@@ -67,6 +67,11 @@ resources:
           # defaults to 15s if unset.
           - name: RECONCILE_INTERVAL_SECONDS
             value: "15"
+          # Root log level for the engine's loggers (server/logging_config.py).
+          # Optional; the app defaults to INFO if unset. Set DEBUG to also
+          # surface the per-call GitHub transport lines.
+          - name: LOG_LEVEL
+            value: "INFO"
 
 variables:
   app_name:
