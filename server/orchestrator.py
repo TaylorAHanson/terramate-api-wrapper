@@ -182,6 +182,8 @@ def _substitute_text(text: str, substitutions: dict[str, Any]) -> str:
 
 
 def _substitute_structure(value: Any, substitutions: dict[str, Any]) -> Any:
+    """Recurse through an `EditFile.patch`-mutated dict/list, substituting
+    placeholders in every string leaf (see `_substitute_edit`)."""
     if isinstance(value, str):
         return _substitute_text(value, substitutions)
     if isinstance(value, dict):
