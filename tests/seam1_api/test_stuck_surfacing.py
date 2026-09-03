@@ -44,7 +44,7 @@ def _clean_slate():
 def _create_workspace_request(name: str) -> str:
     response = client.post(
         "/v1/requests",
-        headers={"Idempotency-Key": str(uuid.uuid4()), "X-Requester": "svc-tester"},
+        headers={"Idempotency-Key": str(uuid.uuid4()), "X-Forwarded-Email": "svc-tester"},
         json={
             "type": "workspace",
             "params": {"name": name, "metastore": "main", "domain_owner": "platform-team", "groups": ["data-eng"]},

@@ -73,6 +73,9 @@ class Step(Base):
     # clears on the next transition.
     status_changed_at: Mapped[datetime] = _server_now()
     stuck: Mapped[bool] = mapped_column(server_default=func.false())
+    # The reported apply run's console text (#54, ADR-0003) — set by
+    # `orchestrator.record_apply_result`, whether the apply succeeded or not.
+    tf_console: Mapped[str | None]
     created_at: Mapped[datetime] = _server_now()
     updated_at: Mapped[datetime] = _server_now()
 
