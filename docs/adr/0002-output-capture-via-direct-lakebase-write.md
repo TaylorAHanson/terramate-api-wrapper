@@ -1,6 +1,6 @@
 # 0002 — Capture Step outputs via a direct GitHub Action → Lakebase write
 
-- Status: Accepted
+- Status: Superseded by [0003](0003-output-capture-via-action-api-put.md)
 - Date: 2026-09-01
 
 ## Context

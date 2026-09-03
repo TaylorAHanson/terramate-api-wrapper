@@ -656,9 +656,19 @@ Referring to "Terramate's (undocumented) native output-sharing"
 Options
 - API polls Github Actions output
 - API polls Github PR (comment? Text body)
-- Github Actions POST to API
-**- Direct write to Lakebase via sdk**
-Decision: **Direct write from GH action to Lakebase via sdk** SCD 2?
+- **Github Actions POST to API**
+  ```
+  PUT /v1/requests/{id}
+  {
+    "applied": true|false,
+    "outputs": {"workspace_id": 0123456},
+    "tf_console": str,
+  }
+  ```
+- Direct write to Lakebase via sdk *(rejected — needs a standing Lakebase write credential in CI and couples CI to the DB schema)*
+
+**Key Decision:** the GitHub Action **reports outputs to the API** (the `PUT` above), not a direct Lakebase write. The API stays the sole writer of Lakebase and captures `tf_console` in the same call; CI holds only a scoped API token. See [ADR-0003](docs/adr/0003-output-capture-via-action-api-put.md), which supersedes [ADR-0002](docs/adr/0002-output-capture-via-direct-lakebase-write.md).
+
 Future consideration: Consider threading this into restfull endpoints to expose status so an agent could reason over it and suggest what to do next in various unhandled failure modes
 
 ### Nomenclature
