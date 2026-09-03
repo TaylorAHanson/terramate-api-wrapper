@@ -58,6 +58,11 @@ resources:
             value: "${var.environment}"
           - name: LAKEBASE_INSTANCE_NAME
             value: "${resources.database_instances.provisioning_db.name}"
+          # When "true", apply `alembic upgrade head` on startup (server/migrate.py),
+          # serialized across instances by a pg advisory lock. Default "false":
+          # migrations are otherwise a deliberate out-of-band step. Set per target.
+          - name: RUN_MIGRATIONS_ON_STARTUP
+            value: "${var.run_migrations_on_startup}"
           - name: GITHUB_PAT
             valueFrom: github-pat
           - name: GITHUB_REPO
@@ -123,6 +128,13 @@ variables:
       caller is authorized — set per target once the CI principal is
       registered.
     default: ""
+  run_migrations_on_startup:
+    description: >-
+      When "true", the app applies `alembic upgrade head` on startup
+      (server/migrate.py), serialized across instances by a Postgres advisory
+      lock. Default "false" — migrations are normally a deliberate out-of-band
+      step (migrations/env.py). Intended for dev/test targets.
+    default: "false"
 
 targets:
   dev:
@@ -131,6 +143,7 @@ targets:
     variables:
       environment: "dev"
       app_name: "terramate-api-wrapper-dev"
+      run_migrations_on_startup: "true"
   prod:
     mode: production
     variables:

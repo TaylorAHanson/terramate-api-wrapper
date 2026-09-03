@@ -29,6 +29,7 @@ from fastapi.staticfiles import StaticFiles
 from server.config import get_settings
 from server.github_client import GitHubClient, RealGitHubClient
 from server.logging_config import configure_logging
+from server.migrate import run_migrations_upgrade_head
 from server.routes import admin, health, requests
 from server.scheduler import reconcile_loop
 
@@ -53,6 +54,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     configure_logging(settings.log_level)
     logger.info("app_startup environment=%s log_level=%s", settings.app_environment, settings.log_level)
+
+    # Bring the schema to head before serving or reconciling, when this target
+    # opts into it (server.migrate). Off by default — migrations are otherwise
+    # a deliberate out-of-band step. A failure here aborts startup on purpose:
+    # serving against a half-migrated schema is worse than failing the deploy.
+    if settings.run_migrations_on_startup:
+        logger.info("run_migrations_on_startup enabled — applying migrations before serving")
+        try:
+            await asyncio.to_thread(run_migrations_upgrade_head)
+        except Exception:
+            logger.exception("run_migrations_on_startup failed — aborting startup")
+            raise
+
     client = _build_reconcile_client()
     task: asyncio.Task | None = None
     if client is not None:
