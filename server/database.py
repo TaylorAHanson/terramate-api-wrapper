@@ -13,6 +13,9 @@ of this and points straight at a plain Postgres instance.
 """
 from __future__ import annotations
 
+import logging
+import os
+import threading
 import uuid
 from typing import Any, Iterator
 
@@ -22,10 +25,52 @@ from sqlalchemy.orm import Session
 
 from server.config import get_settings
 
+logger = logging.getLogger(__name__)
+
 # Lakebase-minted tokens live for roughly an hour; recycling connections well
 # before that means a connection is never handed out on a token that has
 # already expired.
 _POOL_RECYCLE_SECONDS = 1500
+
+
+def _schema_for(env: str) -> str | None:
+    """The schema this deployment's tables live in, or None to keep the default.
+
+    On managed Lakebase the app's role can CONNECT + CREATE but does NOT own the
+    `public` schema, so an unqualified `CREATE TABLE` fails with "permission
+    denied for schema public" (Postgres 15+ dropped the default CREATE grant on
+    `public`). The role *can* create — and then owns — its own schema, so we put
+    every table in a dedicated per-environment schema and pin `search_path` to
+    it: no owner intervention, no GRANTs, and dev/test/prod stay isolated on the
+    one injected Lakebase database. Local/test take the DATABASE_URL path (no
+    PGDATABASE) and keep `public`, which the connecting user owns there. Pattern
+    mirrors the sc-command-center reference app; `APP_DB_SCHEMA` overrides it.
+    """
+    if not os.environ.get("PGDATABASE"):
+        return None
+    override = os.environ.get("APP_DB_SCHEMA", "").strip()
+    if override:
+        return override
+    return env if env in ("dev", "test", "prod") else "app"
+
+
+# `CREATE SCHEMA IF NOT EXISTS` only needs to run once per process, not on every
+# pooled connection — search_path itself rides in the connection's startup
+# packet for free. A restart re-checks.
+_schema_ready: set[str] = set()
+_schema_ready_lock = threading.Lock()
+
+
+def _ensure_schema(conn: Any, schema: str) -> None:
+    with _schema_ready_lock:
+        if schema in _schema_ready:
+            return
+    cur = conn.cursor()
+    cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+    conn.commit()
+    cur.close()
+    with _schema_ready_lock:
+        _schema_ready.add(schema)
 
 
 def _fetch_lakebase_credential(instance_name: str) -> tuple[str, str]:
@@ -82,8 +127,15 @@ def _connect() -> Any:
             "and LAKEBASE_INSTANCE_NAME for a deployed Databricks App."
         )
 
+    # Imported locally, mirroring connect_to_url — psycopg2 has no module-level
+    # import in this file, and this Lakebase branch referenced it without one
+    # (never exercised until a real deployed connection, since tests take the
+    # DATABASE_URL path above).
+    import psycopg2
+
     user, token = _fetch_lakebase_credential(settings.lakebase_instance_name)
-    return psycopg2.connect(
+    schema = _schema_for(settings.app_environment)
+    connect_kwargs: dict[str, Any] = dict(
         host=settings.pg_host,
         port=settings.pg_port,
         dbname=settings.pg_database,
@@ -91,6 +143,16 @@ def _connect() -> Any:
         password=token,
         sslmode="require",
     )
+    if schema:
+        # Sent in the startup packet so the session begins on the right
+        # search_path with no extra round trip; the name is a plain identifier
+        # (dev/test/prod/app), safe to inline. A search_path naming a
+        # not-yet-created schema is harmless — _ensure_schema creates it next.
+        connect_kwargs["options"] = f"-c search_path={schema}"
+    conn = psycopg2.connect(**connect_kwargs)
+    if schema:
+        _ensure_schema(conn, schema)
+    return conn
 
 
 _engine: Engine | None = None
