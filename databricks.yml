@@ -64,7 +64,7 @@ resources:
           - name: RUN_MIGRATIONS_ON_STARTUP
             value: "${var.run_migrations_on_startup}"
           - name: GITHUB_PAT
-            valueFrom: github-pat
+            value_from: github-pat
           - name: GITHUB_REPO
             value: "${var.github_repo}"
           # How often the in-process reconcile driver (server/scheduler.py, the
