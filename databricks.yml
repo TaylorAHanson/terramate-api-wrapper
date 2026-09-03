@@ -83,6 +83,13 @@ resources:
           # until an operator sets this per target.
           - name: ADMIN_PRINCIPALS
             value: "${var.admin_principals}"
+          # Forwarded identities authorized to call the ADR-0003 output-report
+          # ingress (PUT .../steps/{n}/outputs, server/auth.py, #55) — the CI
+          # M2M service principal a Step's GitHub Action authenticates as.
+          # Comma-separated; empty (the default) means no caller is
+          # authorized until an operator sets this per target.
+          - name: CI_PRINCIPALS
+            value: "${var.ci_principals}"
 
 variables:
   app_name:
@@ -107,6 +114,14 @@ variables:
       X-Forwarded-User) authorized to read/flip the intake off-switch
       (server/auth.py, #47). Empty means nobody is authorized — set per
       target once the operator's identity is known.
+    default: ""
+  ci_principals:
+    description: >-
+      Comma-separated forwarded identities authorized to call the ADR-0003
+      output-report ingress (server/auth.py, #55) — the CI M2M service
+      principal a Step's GitHub Action authenticates as. Empty means no
+      caller is authorized — set per target once the CI principal is
+      registered.
     default: ""
 
 targets:

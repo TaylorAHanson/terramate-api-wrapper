@@ -3,10 +3,11 @@ dependency order, and the `bind` Step's PR carries `create`'s apply-derived
 `workspace_id` resolved by reference (#20) — real HTTP + a real test
 Lakebase, with only GitHubClient faked.
 
-There is no real GitHub Action here to write `create`'s output to Lakebase
-(ADR-0002) — that lands with the fixture-repo integration, #22 — so these
-tests simulate the Action's write by inserting the `Output` row directly,
-the same way `test_reconcile_loop.py` fakes GitHub itself.
+There is no real GitHub Action here to report `create`'s output over HTTP
+(ADR-0003) — that lands with the fixture-repo integration, #22 — so these
+tests simulate the Action's report by driving the real
+`PUT .../steps/{n}/outputs` ingress (#55) directly, the same way
+`test_reconcile_loop.py` fakes GitHub itself.
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ import uuid
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, select
+from sqlalchemy import delete
 
 from server import orchestrator
 from server.database import get_session
@@ -112,14 +113,14 @@ def test_bind_pr_does_not_open_until_create_is_applied_and_its_output_is_capture
     assert _step(detail, "bind")["status"] == "queued"
     assert len(fake.opened_pull_requests) == 1  # bind held: no output yet
 
-    # Simulate the GitHub Action's direct Lakebase write (ADR-0002).
-    create_step_row = db_session.scalars(
-        select(Step).where(Step.request_id == request_id, Step.key == "create")
-    ).one()
-    db_session.add(
-        Output(id=str(uuid.uuid4()), step_id=create_step_row.id, key="workspace_id", value="ws-42")
+    # Simulate the GitHub Action's ADR-0003 apply-result report.
+    create_ordinal = _step(detail, "create")["ordinal"]
+    report = client.put(
+        f"/v1/requests/{request_id}/steps/{create_ordinal}/outputs",
+        headers={"X-Forwarded-User": "ci-tester"},
+        json={"applied": True, "outputs": {"workspace_id": "ws-42"}, "tf_console": "Apply complete!"},
     )
-    db_session.commit()
+    assert report.status_code == 200
 
     orchestrator.tick(db_session, fake)
     detail = _get_request(request_id)
