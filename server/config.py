@@ -60,6 +60,13 @@ class Settings:
     # authorized, which is the safe default until an operator sets it.
     admin_principals: frozenset[str]
 
+    # When True, the app applies `alembic upgrade head` on startup
+    # (server.migrate), serialized across instances by a Postgres advisory
+    # lock. Off by default: migrations are normally a deliberate, out-of-band
+    # step (migrations/env.py), so auto-applying an unreviewed migration on
+    # boot is opt-in per target (intended for dev/test).
+    run_migrations_on_startup: bool
+
 
 def get_settings() -> Settings:
     return Settings(
@@ -78,4 +85,6 @@ def get_settings() -> Settings:
         admin_principals=frozenset(
             p.strip() for p in os.environ.get("ADMIN_PRINCIPALS", "").split(",") if p.strip()
         ),
+        run_migrations_on_startup=os.environ.get("RUN_MIGRATIONS_ON_STARTUP", "").strip().lower()
+        in ("1", "true", "yes", "on"),
     )
