@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Sequence
 
@@ -378,6 +379,66 @@ def _transition_to_applied(session: Session, step: Step) -> None:
     else:
         _transition(step, "applied")
     _roll_up_request(session, step.request_id)
+
+
+def record_apply_result(
+    session: Session,
+    step: Step,
+    applied: bool,
+    outputs: dict[str, Any],
+    tf_console: str,
+) -> None:
+    """Persist a merged Step's reported apply result (ADR-0003 — the future
+    `PUT .../steps/{n}/outputs` calls straight into this). #54 is the
+    HTTP-free persistence seam: today's only caller is a test; the endpoint
+    itself is #55.
+
+    `tf_console` is always stored, applied or not. `applied=False` moves the
+    Step to `apply_failed` through `_transition` (the #41 log line +
+    `status_changed_at`) — a status that didn't exist before this: a Step
+    previously only ever reached `applying` after merge, with no way to
+    report that the apply itself failed.
+
+    `applied=True` upserts each of `outputs` into `Output`, keyed by
+    `(step_id, key)`, by overwriting an existing row's `value` in place
+    rather than re-`add`ing one — a plain insert would trip
+    `uq_output_step_key` on a retried report, so this makes a duplicate
+    report with identical values a no-op. It then re-checks the same
+    `_produced_outputs_present` gate `_advance_applying` polls every tick and,
+    if the Step's full `produces` set is now present, advances it to
+    `applied` immediately via `_transition_to_applied` — **this seam
+    transitions directly**, rather than leaving it for the next reconcile
+    tick, so a caller never needs a follow-up `tick()` to see the Step land.
+    A partial report (not every `produces` key present yet) leaves the Step
+    held at `applying`, exactly as a partial/late ADR-0002-style write would.
+
+    Both branches only transition while the Step is still `applying` — a
+    repeated report against an already-`applied`/`apply_failed` Step still
+    updates `tf_console`/outputs but does not re-transition (no re-run
+    postflight hooks, no re-logged transition), keeping a retried report
+    idempotent rather than merely non-erroring.
+    """
+    step.tf_console = tf_console
+
+    if not applied:
+        if step.status == "applying":
+            _transition(step, "apply_failed")
+            _roll_up_request(session, step.request_id)
+        session.commit()
+        return
+
+    for key, value in outputs.items():
+        existing = session.scalars(
+            select(Output).where(Output.step_id == step.id, Output.key == key)
+        ).one_or_none()
+        if existing is None:
+            session.add(Output(id=str(uuid.uuid4()), step_id=step.id, key=key, value=value))
+        else:
+            existing.value = value
+
+    if step.status == "applying" and _produced_outputs_present(session, step):
+        _transition_to_applied(session, step)
+    session.commit()
 
 
 def _flag_stuck_steps(session: Session, stuck_threshold_seconds: float | None) -> None:

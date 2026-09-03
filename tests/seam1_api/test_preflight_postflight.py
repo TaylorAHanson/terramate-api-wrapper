@@ -72,7 +72,7 @@ def _idempotency_key() -> str:
 
 
 def _headers(idempotency_key: str) -> dict[str, str]:
-    return {"Idempotency-Key": idempotency_key, "X-Requester": "svc-tester"}
+    return {"Idempotency-Key": idempotency_key, "X-Forwarded-Email": "svc-tester"}
 
 
 def _create_schema_request(name: str) -> str:
