@@ -28,6 +28,7 @@ from alembic.config import Config
 
 os.environ.setdefault("APP_ENVIRONMENT", "test")
 os.environ.setdefault("ADMIN_PRINCIPALS", "admin-tester@example.com")
+os.environ.setdefault("CI_PRINCIPALS", "ci-tester")
 
 from server import database  # noqa: E402  (must follow the env default above)
 

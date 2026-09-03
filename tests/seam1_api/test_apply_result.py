@@ -1,9 +1,11 @@
 """Seam 1: `orchestrator.record_apply_result` — the persistence seam ADR-0003's
-future `PUT /v1/requests/{id}/steps/{n}/outputs` endpoint will sit on (#54).
+`PUT /v1/requests/{id}/steps/{n}/outputs` endpoint (#55) sits on (#54).
 
-No HTTP here by design (the endpoint is #55) — these tests call the function
-directly, against a real test Lakebase, driving the `workspace` Recipe's
-`create` Step into `applying` the same way test_stuck_surfacing.py does.
+No HTTP here by design — these tests call the function directly, against a
+real test Lakebase, driving the `workspace` Recipe's `create` Step into
+`applying` the same way test_stuck_surfacing.py does. See
+test_output_report.py for the HTTP-level coverage of the endpoint itself
+(auth, 404/409 policy, idempotent retries through real requests).
 """
 from __future__ import annotations
 

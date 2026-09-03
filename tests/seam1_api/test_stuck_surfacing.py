@@ -1,12 +1,13 @@
 """Seam 1: a Step held at `applying` past the threshold is surfaced as `stuck`
 (#43) — real HTTP + a real test Lakebase, only GitHubClient faked.
 
-architecture.md §14 holds a merged Step at `applying` until its Action writes
-the ADR-0002 outputs; if the Action never does, the Step is silent forever.
-These tests drive the `workspace` Recipe's `create` Step into `applying` (merged,
-but its `workspace_id` output not yet written), then prove the reconcile loop
-flags it `stuck` once past the threshold, logs it exactly once, exposes it on
-the API, and clears it when the output finally arrives.
+architecture.md §14 holds a merged Step at `applying` until its Action reports
+the ADR-0003 outputs over HTTP; if the Action never does, the Step is silent
+forever. These tests drive the `workspace` Recipe's `create` Step into
+`applying` (merged, but its `workspace_id` output not yet reported), then
+prove the reconcile loop flags it `stuck` once past the threshold, logs it
+exactly once, exposes it on the API, and clears it when the report finally
+arrives via the real `PUT .../steps/{n}/outputs` ingress (#55).
 """
 from __future__ import annotations
 
@@ -133,13 +134,15 @@ def test_stuck_flag_clears_when_the_output_finally_arrives(db_session):
     orchestrator.tick(db_session, FakeGitHubClient())
     assert _step(_get_request(request_id), "create")["stuck"] is True
 
-    # The Action's ADR-0002 write finally lands; the next tick advances create
-    # to `applied` and the stuck flag clears with the transition.
-    create_row = db_session.scalars(
-        select(Step).where(Step.request_id == request_id, Step.key == "create")
-    ).one()
-    db_session.add(Output(id=str(uuid.uuid4()), step_id=create_row.id, key="workspace_id", value="ws-42"))
-    db_session.commit()
+    # The Action's ADR-0003 report finally lands; the next tick advances
+    # create to `applied` and the stuck flag clears with the transition.
+    create_ordinal = _step(_get_request(request_id), "create")["ordinal"]
+    report = client.put(
+        f"/v1/requests/{request_id}/steps/{create_ordinal}/outputs",
+        headers={"X-Forwarded-User": "ci-tester"},
+        json={"applied": True, "outputs": {"workspace_id": "ws-42"}, "tf_console": "Apply complete!"},
+    )
+    assert report.status_code == 200
 
     orchestrator.tick(db_session, FakeGitHubClient())
     create_after = _step(_get_request(request_id), "create")

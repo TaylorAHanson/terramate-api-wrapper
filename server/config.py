@@ -60,6 +60,15 @@ class Settings:
     # authorized, which is the safe default until an operator sets it.
     admin_principals: frozenset[str]
 
+    # The forwarded identities authorized to call the ADR-0003 output-report
+    # ingress (`PUT .../steps/{n}/outputs`, #55) — the CI M2M service
+    # principal a Step's GitHub Action authenticates as. Same trust model as
+    # `admin_principals`: read from the platform-stamped forwarded headers
+    # (server.auth), never from a client-controlled one. Comma-separated;
+    # empty means no caller is authorized, the safe default until an
+    # operator registers the CI principal per target.
+    ci_principals: frozenset[str]
+
     # When True, the app applies `alembic upgrade head` on startup
     # (server.migrate), serialized across instances by a Postgres advisory
     # lock. Off by default: migrations are normally a deliberate, out-of-band
@@ -84,6 +93,9 @@ def get_settings() -> Settings:
         step_stuck_threshold_seconds=float(os.environ.get("STEP_STUCK_THRESHOLD_SECONDS", "3600")),
         admin_principals=frozenset(
             p.strip() for p in os.environ.get("ADMIN_PRINCIPALS", "").split(",") if p.strip()
+        ),
+        ci_principals=frozenset(
+            p.strip() for p in os.environ.get("CI_PRINCIPALS", "").split(",") if p.strip()
         ),
         run_migrations_on_startup=os.environ.get("RUN_MIGRATIONS_ON_STARTUP", "").strip().lower()
         in ("1", "true", "yes", "on"),

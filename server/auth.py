@@ -63,3 +63,26 @@ def require_admin(
         raise HTTPException(status_code=403, detail="Not authorized")
     logger.info("admin_auth_accepted identity=%s", identity)
     return identity
+
+
+def require_ci_principal(
+    x_forwarded_email: str | None = Header(default=None, alias="X-Forwarded-Email"),
+    x_forwarded_user: str | None = Header(default=None, alias="X-Forwarded-User"),
+) -> str:
+    """Gate for the ADR-0003 output-report ingress (`PUT .../steps/{n}/outputs`,
+    #55): the caller must resolve to a trusted forwarded identity (same
+    platform-stamped-header trust model as `resolve_requester`/`require_admin`
+    — never a client-controlled header) that also appears on the
+    `CI_PRINCIPALS` allowlist, the CI M2M service principal a Step's GitHub
+    Action authenticates as. No resolvable identity is `401`,
+    resolved-but-not-allowed is `403` — either way, no state changes.
+    """
+    identity = _forwarded_identity(x_forwarded_email, x_forwarded_user)
+    if identity is None:
+        logger.warning("ci_auth_rejected reason=no_forwarded_identity")
+        raise HTTPException(status_code=401, detail="No resolvable caller identity")
+    if identity not in get_settings().ci_principals:
+        logger.warning("ci_auth_rejected reason=not_authorized identity=%s", identity)
+        raise HTTPException(status_code=403, detail="Not authorized")
+    logger.info("ci_auth_accepted identity=%s", identity)
+    return identity

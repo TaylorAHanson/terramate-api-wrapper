@@ -1,6 +1,7 @@
 """`POST /v1/requests`, `GET /v1/requests/{id}`,
-`GET /v1/requests/{id}/steps/{n}`, `GET /v1/requests/{id}/steps/{n}/plan`, and
-`POST /v1/requests/{id}/cancel` (architecture.md §5, §6, §11).
+`GET /v1/requests/{id}/steps/{n}`, `GET /v1/requests/{id}/steps/{n}/plan`,
+`PUT /v1/requests/{id}/steps/{n}/outputs`, and `POST /v1/requests/{id}/cancel`
+(architecture.md §5, §6, §11).
 
 `POST` checks the intake gate (`server.intake_gate`, #21) is open, validates
 the body against its type's discriminated-union member (published in
@@ -10,8 +11,11 @@ of one or more Steps — translating each StepSpec's `depends_on` (Step *keys*)
 into the Step *row ids* generated here, since those ids don't exist until
 insert time. The reconcile loop (`server.orchestrator`) then claims and
 advances that Playbook's Steps; the `/plan` route just reads back the
-`terraform plan` the loop captured once a Step has one, and `/cancel` halts
-a request the same way a failed Step does.
+`terraform plan` the loop captured once a Step has one, `/outputs` is the
+ADR-0003 ingress a Step's GitHub Action PUTs its apply result to (#55, gated
+on the CI M2M principal, delegating straight into `orchestrator.
+record_apply_result`, #54), and `/cancel` halts a request the same way a
+failed Step does.
 """
 from __future__ import annotations
 
@@ -26,7 +30,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from server.auth import resolve_requester
+from server import orchestrator
+from server.auth import require_ci_principal, resolve_requester
 from server.database import get_db
 from server.intake_gate import get_gate
 from server.models import ProvisioningRequest, Step
@@ -236,6 +241,87 @@ def get_step_plan(
     if step.plan_ref is None:
         raise HTTPException(status_code=409, detail="Plan not available yet")
     return StepPlanResponse(ordinal=step.ordinal, key=step.key, status=step.status, plan=step.plan_ref)
+
+
+class OutputReportRequest(BaseModel):
+    applied: bool
+    outputs: dict = Field(default_factory=dict)
+    tf_console: str
+
+
+class OutputReportResponse(BaseModel):
+    ordinal: int
+    key: str
+    status: str
+
+
+# The Step states a report may land on (ADR-0003, #55): `applying` is the
+# real case — a merged Step waiting on its Action's report — and
+# `applied`/`apply_failed` are a retried report against a Step this same
+# endpoint already resolved (record_apply_result makes an identical retry
+# there a no-op, see server.orchestrator). Any other status — the Step never
+# reached `applying` (`queued`/`pr_open`/`awaiting_approval`), or it resolved
+# some other way (`rejected`/`plan_failed`) — means the report doesn't match
+# reality, so it's rejected rather than blindly overwriting `tf_console`/
+# outputs on a Step nothing is waiting on.
+_REPORTABLE_STEP_STATUSES = {"applying", "applied", "apply_failed"}
+
+
+@router.put("/v1/requests/{request_id}/steps/{ordinal}/outputs", response_model=OutputReportResponse)
+def report_step_outputs(
+    request_id: str,
+    ordinal: int,
+    body: OutputReportRequest,
+    # The CI M2M service principal a Step's GitHub Action authenticates as
+    # (#47, #55) — this ingress writes provisioning truth, so it is gated the
+    # same way the admin off-switch is: a trusted, platform-stamped forwarded
+    # identity, never a client-controlled header.
+    ci_principal: str = Depends(require_ci_principal),
+    session: Session = Depends(get_db),
+) -> OutputReportResponse:
+    """`PUT /v1/requests/{id}/steps/{n}/outputs` (ADR-0003) — the HTTP ingress
+    a Step's GitHub Action calls with its apply result. Resolves the
+    step-scoped path to a Step row and delegates to the persistence seam
+    (`orchestrator.record_apply_result`, #54); this route does not
+    re-implement the transition/upsert logic itself, only validation, Step
+    resolution, and the wrong-state policy below.
+    """
+    step = _find_step(session, request_id, ordinal)
+    if step is None:
+        logger.warning(
+            "apply_result_rejected reason=step_not_found request_id=%s ordinal=%s",
+            request_id,
+            ordinal,
+        )
+        raise HTTPException(status_code=404, detail="Step not found")
+
+    if step.status not in _REPORTABLE_STEP_STATUSES:
+        logger.warning(
+            "apply_result_rejected reason=wrong_step_state request_id=%s step=%s ordinal=%s status=%s",
+            request_id,
+            step.key,
+            ordinal,
+            step.status,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=f"Step is not in a state that accepts an apply report: {step.status}",
+        )
+
+    # Never log `outputs`/`tf_console` — they're the Action's reported
+    # Terraform values and console text, not ours to assume are secret-free.
+    orchestrator.record_apply_result(
+        session, step, applied=body.applied, outputs=body.outputs, tf_console=body.tf_console
+    )
+    logger.info(
+        "apply_result_accepted request_id=%s step=%s ordinal=%s applied=%s status=%s",
+        request_id,
+        step.key,
+        ordinal,
+        body.applied,
+        step.status,
+    )
+    return OutputReportResponse(ordinal=step.ordinal, key=step.key, status=step.status)
 
 
 class CancelRequestResponse(BaseModel):
