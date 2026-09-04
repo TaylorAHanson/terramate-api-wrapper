@@ -57,19 +57,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -r scripts/requirements.txt
+      # report_outputs.py is stdlib-only (urllib/json) — no pip install needed.
       - run: terraform init -input=false
-      - run: terraform apply -input=false -auto-approve -no-color
-      - name: Write outputs to Lakebase (ADR-0002)
+      # tee the apply console so it can be reported as the Step's tf_console.
+      - run: terraform apply -input=false -auto-approve -no-color | tee apply.txt
+      - name: Report apply result to the provisioning API (ADR-0003)
         env:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          DATABASE_URL: ${{ secrets.SEAM3_DATABASE_URL }}
-          DATABRICKS_HOST: ${{ secrets.SEAM3_DATABRICKS_HOST }}
-          DATABRICKS_CLIENT_ID: ${{ secrets.SEAM3_DATABRICKS_CLIENT_ID }}
-          DATABRICKS_CLIENT_SECRET: ${{ secrets.SEAM3_DATABRICKS_CLIENT_SECRET }}
-          LAKEBASE_INSTANCE_NAME: ${{ secrets.SEAM3_LAKEBASE_INSTANCE_NAME }}
-          PGHOST: ${{ secrets.SEAM3_PGHOST }}
-          PGPORT: ${{ secrets.SEAM3_PGPORT }}
-          PGDATABASE: ${{ secrets.SEAM3_PGDATABASE }}
-          PGUSER: ${{ secrets.SEAM3_PGUSER }}
-        run: python scripts/write_output.py
+          # The deployed app's base URL and the CI service principal's M2M
+          # client-credentials (see fixtures/.../scripts/report_outputs.py and
+          # the fixture README). The SP's forwarded identity must be on the
+          # app's CI_PRINCIPALS allowlist.
+          APP_URL: ${{ secrets.APP_URL }}
+          DATABRICKS_HOST: ${{ secrets.CI_DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.CI_DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.CI_DATABRICKS_CLIENT_SECRET }}
+        run: |
+          export TF_CONSOLE="$(cat apply.txt)"
+          python scripts/report_outputs.py
