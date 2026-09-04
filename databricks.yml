@@ -144,6 +144,12 @@ targets:
       environment: "dev"
       app_name: "terramate-api-wrapper-dev"
       run_migrations_on_startup: "true"
+      # Placeholder dev identities so `bundle run -t dev` boots without needing
+      # --var (empty values are rejected at app startup). Override per deploy
+      # with the real operator/CI principal, e.g.
+      #   --var="admin_principals=you@example.com" --var="ci_principals=…"
+      admin_principals: "dev-admin@example.com"
+      ci_principals: "dev-ci@example.com"
   prod:
     mode: production
     variables:
