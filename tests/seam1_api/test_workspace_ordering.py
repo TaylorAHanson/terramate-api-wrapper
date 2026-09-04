@@ -3,11 +3,12 @@ dependency order, and the `bind` Step's PR carries `create`'s apply-derived
 `workspace_id` resolved by reference (#20) — real HTTP + a real test
 Lakebase, with only GitHubClient faked.
 
-There is no real GitHub Action here to report `create`'s output over HTTP
-(ADR-0003) — that lands with the fixture-repo integration, #22 — so these
-tests simulate the Action's report by driving the real
-`PUT .../steps/{n}/outputs` ingress (#55) directly, the same way
-`test_reconcile_loop.py` fakes GitHub itself.
+There is no real CI here to report `create`'s outcome over HTTP (ADR-0003/
+ADR-0004) — that lands with the fixture-repo integration, #22 — so these tests
+simulate CI's terminal push by driving the real `PUT .../steps/{n}/outputs`
+ingress (#55) directly, the same way `test_reconcile_loop.py` fakes GitHub
+itself. Per ADR-0004 the API no longer polls for merge/plan: a Step sits at
+`submitted` until CI pushes `done`/`failed`/`rejected`.
 """
 from __future__ import annotations
 
@@ -94,47 +95,49 @@ def test_create_workspace_request_persists_a_two_step_playbook_wired_by_row_id()
     assert bind_step["depends_on"][0] != "create"
 
 
-def test_bind_pr_does_not_open_until_create_is_applied_and_its_output_is_captured(db_session):
+def test_bind_pr_does_not_open_until_create_is_done_and_its_output_is_captured(db_session):
     request_id = _create_workspace_request("reporting")
     fake = FakeGitHubClient()
 
     orchestrator.tick(db_session, fake)
     detail = _get_request(request_id)
     assert len(fake.opened_pull_requests) == 1
-    assert _step(detail, "create")["status"] == "awaiting_approval"
+    assert _step(detail, "create")["status"] == "submitted"
     assert _step(detail, "bind")["status"] == "queued"
-    create_pr_number = _step(detail, "create")["pr_number"]
 
-    # Merge create's PR — but nothing has written its output yet.
-    fake.merged_pr_numbers.add(create_pr_number)
+    # A tick before create's push must not open bind's PR — its dependency
+    # isn't `done` yet.
     orchestrator.tick(db_session, fake)
     detail = _get_request(request_id)
-    assert _step(detail, "create")["status"] == "applying"
     assert _step(detail, "bind")["status"] == "queued"
-    assert len(fake.opened_pull_requests) == 1  # bind held: no output yet
+    assert len(fake.opened_pull_requests) == 1  # bind held: create not done yet
 
-    # Simulate the GitHub Action's ADR-0003 apply-result report.
+    # Simulate CI's ADR-0004 terminal push for create (`done` + outputs).
     create_ordinal = _step(detail, "create")["ordinal"]
     report = client.put(
         f"/v1/requests/{request_id}/steps/{create_ordinal}/outputs",
         headers={"X-Forwarded-User": "ci-tester"},
-        json={"applied": True, "outputs": {"workspace_id": "ws-42"}, "tf_console": "Apply complete!"},
+        json={"status": "done", "outputs": {"workspace_id": "ws-42"}, "tf_console": "Apply complete!"},
     )
     assert report.status_code == 200
 
     orchestrator.tick(db_session, fake)
     detail = _get_request(request_id)
-    assert _step(detail, "create")["status"] == "applied"
-    assert _step(detail, "bind")["status"] == "awaiting_approval"
+    assert _step(detail, "create")["status"] == "done"
+    assert _step(detail, "bind")["status"] == "submitted"
     assert len(fake.opened_pull_requests) == 2
 
     bind_pr = fake.opened_pull_requests[1]
     assert "ws-42" in bind_pr.body
     assert "steps.create.outputs.workspace_id" in bind_pr.body
 
-    bind_pr_number = _step(detail, "bind")["pr_number"]
-    fake.merged_pr_numbers.add(bind_pr_number)
-    orchestrator.tick(db_session, fake)
+    bind_ordinal = _step(detail, "bind")["ordinal"]
+    report = client.put(
+        f"/v1/requests/{request_id}/steps/{bind_ordinal}/outputs",
+        headers={"X-Forwarded-User": "ci-tester"},
+        json={"status": "done", "outputs": {}, "tf_console": "Apply complete!"},
+    )
+    assert report.status_code == 200
     detail = _get_request(request_id)
     assert detail["status"] == "succeeded"
-    assert _step(detail, "bind")["status"] == "applied"
+    assert _step(detail, "bind")["status"] == "done"

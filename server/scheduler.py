@@ -8,11 +8,11 @@ no manual trigger.
 
 Databricks Apps expose a single port and run this app as one `uvicorn` process
 (see databricks.yml), so the driver lives *inside* that process, started and
-stopped by the FastAPI lifespan (server.main). `tick()` blocks on the database
-and on synchronous GitHub HTTP calls (bounded retries aside, `get_plan` itself
-never blocks waiting on GitHub — #45), so each tick is still offloaded to a
-worker thread (`asyncio.to_thread`) rather than run inline, so it never stalls
-uvicorn's event loop.
+stopped by the FastAPI lifespan (server.main). Per ADR-0004 a tick's only work
+is opening PRs (the API no longer polls GitHub for status), but that still
+blocks on the database and on synchronous GitHub HTTP calls, so each tick is
+offloaded to a worker thread (`asyncio.to_thread`) rather than run inline, so
+it never stalls uvicorn's event loop.
 
 Two properties make the loop safe to just keep running:
 

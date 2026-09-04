@@ -1,7 +1,6 @@
 """Seam 1: `GET /v1/requests/{id}/steps/{n}` step-detail route (#48).
 
-architecture.md §11 lists this standalone route, but only the sub-route
-`.../steps/{n}/plan` existed before this — there was no way to fetch a single
+architecture.md §11 lists this standalone route: a way to fetch a single
 Step's detail without pulling the entire request-detail payload.
 """
 from __future__ import annotations

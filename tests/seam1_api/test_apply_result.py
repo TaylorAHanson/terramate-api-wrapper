@@ -1,11 +1,13 @@
 """Seam 1: `orchestrator.record_apply_result` — the persistence seam ADR-0003's
-`PUT /v1/requests/{id}/steps/{n}/outputs` endpoint (#55) sits on (#54).
+`PUT /v1/requests/{id}/steps/{n}/outputs` endpoint (#55) sits on (#54),
+extended by ADR-0004 to carry the terminal outcome (`done`/`failed`/`rejected`)
+rather than a bare `applied` bool.
 
 No HTTP here by design — these tests call the function directly, against a
 real test Lakebase, driving the `workspace` Recipe's `create` Step into
-`applying` the same way test_stuck_surfacing.py does. See
-test_output_report.py for the HTTP-level coverage of the endpoint itself
-(auth, 404/409 policy, idempotent retries through real requests).
+`submitted` (PR open, awaiting CI's push). See test_output_report.py for the
+HTTP-level coverage of the endpoint itself (auth, 404/409 policy, idempotent
+retries through real requests).
 """
 from __future__ import annotations
 
@@ -62,15 +64,12 @@ def _get_request(request_id: str) -> dict:
     return response.json()
 
 
-def _drive_create_into_applying(db_session, request_id: str) -> Step:
-    """create's PR opens, is merged, and — with no output written yet — the
-    Step parks at `applying` (mirrors test_stuck_surfacing.py)."""
+def _drive_create_into_submitted(db_session, request_id: str) -> Step:
+    """create's PR opens and the Step parks at `submitted`, waiting for CI's
+    terminal push (ADR-0004 — the API no longer polls for merge/apply)."""
     fake = FakeGitHubClient()
-    orchestrator.tick(db_session, fake)  # create -> awaiting_approval
-    create_pr = _step(_get_request(request_id), "create")["pr_number"]
-    fake.merged_pr_numbers.add(create_pr)
-    orchestrator.tick(db_session, fake)  # merged, output absent -> applying
-    assert _step(_get_request(request_id), "create")["status"] == "applying"
+    orchestrator.tick(db_session, fake)  # create -> submitted (PR opened)
+    assert _step(_get_request(request_id), "create")["status"] == "submitted"
     return db_session.scalars(
         select(Step).where(Step.request_id == request_id, Step.key == "create")
     ).one()
@@ -81,20 +80,20 @@ def _reload(db_session, step_id: str) -> Step:
     return db_session.get(Step, step_id)
 
 
-def test_a_successful_report_upserts_outputs_stores_console_and_advances_to_applied(db_session):
+def test_a_done_report_upserts_outputs_stores_console_and_advances_to_done(db_session):
     request_id = _create_workspace_request("analytics")
-    create_step = _drive_create_into_applying(db_session, request_id)
+    create_step = _drive_create_into_submitted(db_session, request_id)
 
     orchestrator.record_apply_result(
         db_session,
         create_step,
-        applied=True,
+        outcome="done",
         outputs={"workspace_id": "ws-42"},
         tf_console="Apply complete! Resources: 1 added.",
     )
 
     step = _reload(db_session, create_step.id)
-    assert step.status == "applied"
+    assert step.status == "done"
     assert step.tf_console == "Apply complete! Resources: 1 added."
     output = db_session.scalars(
         select(Output).where(Output.step_id == create_step.id, Output.key == "workspace_id")
@@ -102,33 +101,33 @@ def test_a_successful_report_upserts_outputs_stores_console_and_advances_to_appl
     assert output.value == "ws-42"
 
     # The next Step's PR (bind) opens with create's output resolved by
-    # reference — apply-result reporting is consumed downstream exactly as an
+    # reference — the terminal push is consumed downstream exactly as an
     # ADR-0002 direct write was.
     fake = FakeGitHubClient()
     orchestrator.tick(db_session, fake)
     detail = _get_request(request_id)
-    assert _step(detail, "bind")["status"] == "awaiting_approval"
+    assert _step(detail, "bind")["status"] == "submitted"
     assert "ws-42" in fake.opened_pull_requests[0].body
 
 
-def test_a_duplicate_report_with_identical_values_is_a_no_op(db_session, caplog):
+def test_a_duplicate_done_report_with_identical_values_is_a_no_op(db_session, caplog):
     request_id = _create_workspace_request("reporting")
-    create_step = _drive_create_into_applying(db_session, request_id)
+    create_step = _drive_create_into_submitted(db_session, request_id)
 
     orchestrator.record_apply_result(
-        db_session, create_step, applied=True, outputs={"workspace_id": "ws-1"}, tf_console="first"
+        db_session, create_step, outcome="done", outputs={"workspace_id": "ws-1"}, tf_console="first"
     )
     step = _reload(db_session, create_step.id)
-    assert step.status == "applied"
+    assert step.status == "done"
     first_status_changed_at = step.status_changed_at
 
     with caplog.at_level(logging.INFO, logger="server.orchestrator"):
         orchestrator.record_apply_result(
-            db_session, create_step, applied=True, outputs={"workspace_id": "ws-1"}, tf_console="first"
+            db_session, create_step, outcome="done", outputs={"workspace_id": "ws-1"}, tf_console="first"
         )
 
     step = _reload(db_session, create_step.id)
-    assert step.status == "applied"
+    assert step.status == "done"
     assert step.status_changed_at == first_status_changed_at
     outputs = db_session.scalars(
         select(Output).where(Output.step_id == create_step.id, Output.key == "workspace_id")
@@ -138,37 +137,42 @@ def test_a_duplicate_report_with_identical_values_is_a_no_op(db_session, caplog)
     assert not any("step_transition" in r.message for r in caplog.records)
 
 
-def test_applied_false_transitions_to_apply_failed(db_session):
+def test_a_failed_report_transitions_to_failed(db_session):
     request_id = _create_workspace_request("finance")
-    create_step = _drive_create_into_applying(db_session, request_id)
+    create_step = _drive_create_into_submitted(db_session, request_id)
 
     orchestrator.record_apply_result(
-        db_session, create_step, applied=False, outputs={}, tf_console="Error: something exploded"
+        db_session, create_step, outcome="failed", outputs={}, tf_console="Error: something exploded"
     )
 
     step = _reload(db_session, create_step.id)
-    assert step.status == "apply_failed"
+    assert step.status == "failed"
     assert step.tf_console == "Error: something exploded"
     detail = _get_request(request_id)
     assert detail["status"] == "failed"
 
 
-def test_a_partial_outputs_report_does_not_advance_the_step(db_session):
+def test_a_rejected_report_transitions_to_rejected(db_session):
+    """A PR closed without merging (a human declined it) is pushed as
+    `rejected` by the on-close CI job (ADR-0004) — no outputs, no console."""
     request_id = _create_workspace_request("legal")
-    create_step = _drive_create_into_applying(db_session, request_id)
-    # Widen this Step's expected outputs beyond what the Recipe actually
-    # produces, purely to exercise the partial-report path.
-    create_step.produces = ["workspace_id", "workspace_url"]
-    db_session.commit()
+    create_step = _drive_create_into_submitted(db_session, request_id)
 
     orchestrator.record_apply_result(
-        db_session, create_step, applied=True, outputs={"workspace_id": "ws-9"}, tf_console="partial"
+        db_session, create_step, outcome="rejected", outputs={}, tf_console=""
     )
 
     step = _reload(db_session, create_step.id)
-    assert step.status == "applying"
-    assert step.tf_console == "partial"
-    output = db_session.scalars(
-        select(Output).where(Output.step_id == create_step.id, Output.key == "workspace_id")
-    ).one()
-    assert output.value == "ws-9"
+    assert step.status == "rejected"
+    detail = _get_request(request_id)
+    assert detail["status"] == "failed"
+
+
+def test_an_unknown_outcome_is_rejected(db_session):
+    request_id = _create_workspace_request("ops")
+    create_step = _drive_create_into_submitted(db_session, request_id)
+
+    with pytest.raises(ValueError):
+        orchestrator.record_apply_result(
+            db_session, create_step, outcome="applied", outputs={}, tf_console=""
+        )

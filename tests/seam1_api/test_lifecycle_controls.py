@@ -18,6 +18,7 @@ from tests.seam1_api.fakes import FakeGitHubClient
 client = TestClient(app)
 
 _ADMIN_HEADERS = {"X-Forwarded-Email": "admin-tester@example.com"}
+_CI_HEADERS = {"X-Forwarded-User": "ci-tester"}
 
 
 @pytest.fixture(autouse=True)
@@ -71,6 +72,14 @@ def _get_request(request_id: str) -> dict:
     return response.json()
 
 
+def _report(request_id: str, ordinal: int, **body):
+    return client.put(
+        f"/v1/requests/{request_id}/steps/{ordinal}/outputs",
+        headers=_CI_HEADERS,
+        json={"status": "done", "outputs": {}, "tf_console": "", **body},
+    )
+
+
 def _insert_extra_queued_step(request_id: str, ordinal: int, key: str) -> None:
     """Direct-to-DB, bypassing the (currently single-Step) `schema` Recipe —
     the only way to put a second, independent Step on a request until a
@@ -111,21 +120,22 @@ def test_cancel_a_pending_request_halts_it_before_any_pr_opens(db_session):
     assert detail["steps"][0]["pr_number"] is None
 
 
-def test_cancel_an_awaiting_approval_request_stops_it_from_being_merged_in(db_session):
+def test_cancel_a_submitted_request_stops_a_later_push_from_advancing_it(db_session):
     request_id = _create_schema_request("cancel-in-flight")
     fake = FakeGitHubClient()
     orchestrator.tick(db_session, fake)
-    pr_number = _get_request(request_id)["steps"][0]["pr_number"]
+    assert _get_request(request_id)["steps"][0]["status"] == "submitted"
 
     response = client.post(f"/v1/requests/{request_id}/cancel")
     assert response.status_code == 200
 
-    fake.merged_pr_numbers.add(pr_number)
-    orchestrator.tick(db_session, fake)
+    # A `done` push arriving after the cancel is recorded but must not advance
+    # the Step — the request stays halted (#21).
+    assert _report(request_id, 0, status="done").status_code == 200
 
     detail = _get_request(request_id)
     assert detail["status"] == "cancelled"
-    assert detail["steps"][0]["status"] == "awaiting_approval"
+    assert detail["steps"][0]["status"] == "submitted"
 
 
 def test_cancelling_an_already_cancelled_request_is_idempotent():
@@ -143,9 +153,7 @@ def test_cancelling_a_succeeded_request_is_a_conflict(db_session):
     request_id = _create_schema_request("cancel-succeeded")
     fake = FakeGitHubClient()
     orchestrator.tick(db_session, fake)
-    pr_number = _get_request(request_id)["steps"][0]["pr_number"]
-    fake.merged_pr_numbers.add(pr_number)
-    orchestrator.tick(db_session, fake)
+    assert _report(request_id, 0, status="done").status_code == 200
     assert _get_request(request_id)["status"] == "succeeded"
 
     response = client.post(f"/v1/requests/{request_id}/cancel")
@@ -156,9 +164,7 @@ def test_cancelling_a_failed_request_is_a_conflict(db_session):
     request_id = _create_schema_request("cancel-failed")
     fake = FakeGitHubClient()
     orchestrator.tick(db_session, fake)
-    pr_number = _get_request(request_id)["steps"][0]["pr_number"]
-    fake.closed_unmerged_pr_numbers.add(pr_number)
-    orchestrator.tick(db_session, fake)
+    assert _report(request_id, 0, status="rejected").status_code == 200
     assert _get_request(request_id)["status"] == "failed"
 
     response = client.post(f"/v1/requests/{request_id}/cancel")
@@ -177,10 +183,8 @@ def test_a_rejected_step_halts_the_request_without_rolling_back_or_advancing_sib
     request_id = _create_schema_request("halt-siblings")
     fake = FakeGitHubClient()
     orchestrator.tick(db_session, fake)
-    pr_number = _get_request(request_id)["steps"][0]["pr_number"]
 
-    fake.closed_unmerged_pr_numbers.add(pr_number)
-    orchestrator.tick(db_session, fake)
+    assert _report(request_id, 0, status="rejected").status_code == 200
     assert _get_request(request_id)["status"] == "failed"
     assert _get_request(request_id)["steps"][0]["status"] == "rejected"
 
@@ -211,7 +215,7 @@ def test_closing_the_intake_gate_rejects_new_requests_but_lets_in_flight_work_dr
     in_flight_request_id = _create_schema_request("drain-me")
     fake = FakeGitHubClient()
     orchestrator.tick(db_session, fake)
-    pr_number = _get_request(in_flight_request_id)["steps"][0]["pr_number"]
+    assert _get_request(in_flight_request_id)["steps"][0]["status"] == "submitted"
 
     close = client.post("/v1/admin/intake-gate", json={"enabled": False}, headers=_ADMIN_HEADERS)
     assert close.status_code == 200
@@ -224,9 +228,8 @@ def test_closing_the_intake_gate_rejects_new_requests_but_lets_in_flight_work_dr
     )
     assert rejected.status_code == 503
 
-    # Drain: the reconcile loop is untouched by the gate.
-    fake.merged_pr_numbers.add(pr_number)
-    orchestrator.tick(db_session, fake)
+    # Drain: in-flight work is untouched by the gate — CI's push still lands.
+    assert _report(in_flight_request_id, 0, status="done").status_code == 200
     assert _get_request(in_flight_request_id)["status"] == "succeeded"
 
     reopen = client.post("/v1/admin/intake-gate", json={"enabled": True}, headers=_ADMIN_HEADERS)

@@ -1,28 +1,32 @@
-"""The reconcile loop (architecture.md §4.2, §5, §6).
+"""The reconcile loop (architecture.md §4.2, §5, §6; ADR-0004).
 
 `tick()` is the orchestrator's synchronous entry point — the same one a timer
 would call in production and a test calls directly for deterministic control
 (architecture.md §14, "operator wants a synchronous advance/tick entry
-point"). Each pass: poll GitHub for every Step already awaiting approval,
-check whether any merged Step's apply-derived Outputs have landed yet, then
-claim and open PRs for every currently-runnable queued Step — in that order,
-so a Step that just became runnable this pass is claimed the same tick.
+point").
 
-v1 still collapses `planning`/`planned` into `pr_open`'s wait for the plan —
-`pr_open` is the persisted "PR open, plan not back yet" sub-state #19 flagged
-as future work, added by #45 so a Step whose plan is slow to land no longer
-blocks the tick from claiming and opening PRs for other runnable Steps.
-`_advance_pr_open` re-checks `GitHubClient.get_plan` once per tick (never
-blocking — see server/github_client.py) until it succeeds, then the Step
-moves to `awaiting_approval`.
+Per **ADR-0004** the API opens PRs and then **never polls GitHub for status**.
+Every Step transition after "PR opened" is driven by a CI *push* (the
+`PUT .../steps/{n}/outputs` ingress, ADR-0003, delegating into
+`record_apply_result` below). So `tick()`'s only job is to open PRs for
+runnable queued Steps; it reads no GitHub status. The Step lifecycle collapses
+to:
 
-`merged` -> `applying` -> `applied` does **not** collapse the same way for a
-Step with apply-derived Outputs (#20): a merged Step is held at `applying`
-until its expected Outputs are present in Lakebase (ADR-0002 — written by the
-Step's GitHub Action in production, simulated by a direct Lakebase write in
-Seam 1 tests, since no real Action exists yet), so a dependent Step's PR is
-never opened with a blank reference (architecture.md §14). A Step with no
-Outputs to wait on still collapses straight to `applied` on merge.
+    queued -> submitted -> { done | failed | rejected }
+
+- **queued** — dependencies not yet `done`, or intake gated; no PR yet.
+- **submitted** — the API opened the Step's PR and is waiting for CI's terminal
+  push (this replaces the old `pr_open` + `awaiting_approval` + `applying`
+  states, and with them the plan/merge polling passes).
+- **done / failed / rejected** — CI reported the terminal outcome. `done`
+  carries the Step's apply-derived Outputs; `rejected` is a PR closed without
+  merging (a human declined it) reported by an on-close CI job, or an operator
+  cancel. A preflight failure before the PR ever opens also lands at `failed`.
+
+`_flag_stuck_steps` repurposes #43's surfacing: a Step held at `submitted` past
+the threshold means CI's terminal push never arrived, so it is flagged for a
+human (the on-close/terminal push failing to fire is the one way a Step could
+otherwise hang forever — ADR-0004 "Consequences").
 """
 from __future__ import annotations
 
@@ -37,14 +41,17 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from server.config import get_settings
-from server.github_client import GitHubClient, PlanNotReadyError, correlate
+from server.github_client import GitHubClient, correlate
 from server.models import Output, ProvisioningRequest, Step
 from server.recipes.framework import AddFile, EditFile, FileEdit, StepSpec
 from server.recipes.registry import RECIPES
 
 logger = logging.getLogger(__name__)
 
-_FAILED_STEP_STATUSES = {"plan_failed", "apply_failed", "rejected"}
+# The Step outcomes CI may report over the ingress (ADR-0004).
+APPLY_OUTCOMES = ("done", "failed", "rejected")
+
+_FAILED_STEP_STATUSES = {"failed", "rejected"}
 
 # A request halted here (failed, by a Step; cancelled, by an operator) never
 # resumes (architecture.md §6, "halt-no-rollback") — none of its Steps are
@@ -78,17 +85,19 @@ def _transition(step: Step, to_status: str) -> None:
 
 
 def tick(session: Session, github_client: GitHubClient, stuck_threshold_seconds: float | None = None) -> None:
-    """Advance every in-flight Step by one reconciliation pass.
+    """Advance the engine by one reconciliation pass (ADR-0004).
+
+    The loop's only remaining job is to open PRs for currently-runnable queued
+    Steps — a Step becomes runnable when its dependencies are `done`. Everything
+    after "PR opened" is a CI push, not a poll, so there are no status-advance
+    passes here any more.
 
     `stuck_threshold_seconds` overrides the configured
     `STEP_STUCK_THRESHOLD_SECONDS` (tests pass it to drive stuck detection
     deterministically); `None` reads it from settings.
     """
-    _advance_awaiting_approval(session, github_client)
-    _advance_applying(session)
     while _claim_and_open_next(session, github_client):
         pass
-    _advance_pr_open(session, github_client)
     _flag_stuck_steps(session, stuck_threshold_seconds)
 
 
@@ -112,7 +121,7 @@ def _claim_and_open_next(session: Session, github_client: GitHubClient) -> bool:
         (
             s
             for s in queued_steps
-            if s.request.status not in TERMINAL_REQUEST_STATUSES and _dependencies_applied(session, s)
+            if s.request.status not in TERMINAL_REQUEST_STATUSES and _dependencies_done(session, s)
         ),
         None,
     )
@@ -139,7 +148,7 @@ def _claim_and_open_next(session: Session, github_client: GitHubClient) -> bool:
             step.key,
             step.ordinal,
         )
-        _transition(step, "plan_failed")
+        _transition(step, "failed")
         _roll_up_request(session, step.request_id)
         session.commit()
         return True
@@ -174,33 +183,31 @@ def _claim_and_open_next(session: Session, github_client: GitHubClient) -> bool:
         pr.number,
         pr.url,
     )
-    # The plan wait is deliberately *not* done here (#45) — `get_plan` never
-    # blocks, but this Step's plan may still not be back yet, and a
-    # single `while _claim_and_open_next(): pass` pass must be able to move on
-    # to the next runnable queued Step regardless. `_advance_pr_open` is what
-    # picks this Step back up, this same tick and every tick after.
-    _transition(step, "pr_open")
+    # The PR is open; from here the API waits for CI's terminal push (ADR-0004),
+    # it does not poll. `submitted` is that single "PR open, awaiting CI's
+    # outcome" state — no plan wait, no merge poll.
+    _transition(step, "submitted")
 
     _roll_up_request(session, step.request_id)
     session.commit()
     return True
 
 
-def _dependencies_applied(session: Session, step: Step) -> bool:
+def _dependencies_done(session: Session, step: Step) -> bool:
     if not step.depends_on:
         return True
-    applied_ids = session.scalars(
-        select(Step.id).where(Step.id.in_(step.depends_on), Step.status == "applied")
+    done_ids = session.scalars(
+        select(Step.id).where(Step.id.in_(step.depends_on), Step.status == "done")
     ).all()
-    return set(applied_ids) == set(step.depends_on)
+    return set(done_ids) == set(step.depends_on)
 
 
 def _resolve_consumes(session: Session, step: Step) -> list[tuple[dict, Any]]:
     """Resolve each of this Step's OutputRefs (§5.1's `${steps.<key>.outputs.<name>}`)
     from Lakebase, by reference — never copied ahead of time. Safe to call once
-    the Step is runnable: `_dependencies_applied` already guarantees the
-    referenced Step is `applied`, which in turn guarantees its Outputs exist
-    (see `_produced_outputs_present`).
+    the Step is runnable: `_dependencies_done` already guarantees the referenced
+    Step is `done`, and a Step only reaches `done` once CI's push has persisted
+    its Outputs (see `record_apply_result`), so they are present.
     """
     resolved = []
     for ref in step.consumes:
@@ -284,86 +291,84 @@ def _substitute_structure(value: Any, substitutions: dict[str, Any]) -> Any:
     return value
 
 
-def _produced_outputs_present(session: Session, step: Step) -> bool:
-    if not step.produces:
-        return True
-    captured_keys = session.scalars(
-        select(Output.key).where(Output.step_id == step.id, Output.key.in_(step.produces))
-    ).all()
-    return set(captured_keys) == set(step.produces)
+def record_apply_result(
+    session: Session,
+    step: Step,
+    outcome: str,
+    outputs: dict[str, Any],
+    tf_console: str,
+) -> None:
+    """Persist CI's terminal push for a submitted Step (ADR-0003/ADR-0004 — the
+    `PUT .../steps/{n}/outputs` ingress calls straight into this).
 
+    `outcome` is one of `APPLY_OUTCOMES`:
 
-def _advance_pr_open(session: Session, github_client: GitHubClient) -> None:
-    """Re-check each PR-open Step's plan, one non-blocking attempt per tick
-    (#45) — `PlanNotReadyError` just means "still not back, try again next
-    tick," so one stalled Step is skipped rather than stalling the loop for
-    every other PR-open Step this same tick.
+    - **done** — the apply succeeded. Each of `outputs` is upserted into
+      `Output`, keyed by `(step_id, key)`, by overwriting an existing row's
+      `value` in place rather than re-`add`ing one (a plain insert would trip
+      `uq_output_step_key` on a retried report). The Step then runs its
+      postflight hooks and lands at `done` — or at `failed` if a postflight
+      hook raises (via `_land_after_postflight`). Because the outputs are
+      persisted and the Step reaches `done` in this one call, a dependent
+      Step's later `_resolve_consumes` never sees a blank reference — the
+      atomic push closes the gap the old `applying` hold (#20) bridged.
+    - **failed** — the apply ran and failed; the Step moves to `failed`.
+    - **rejected** — the PR was closed without merging, or an on-close CI job
+      reported it; the Step moves to `rejected`.
+
+    `tf_console` is always stored, whatever the outcome (it may be empty for a
+    `rejected` PR that never applied).
+
+    Every transition is guarded by `_can_advance` (the Step is still
+    `submitted` *and* its request hasn't been halted — an operator cancel or a
+    sibling Step's failure, #21), so:
+
+    - a repeated report against an already-terminal Step still updates
+      `tf_console`/outputs but does not re-transition (no re-run postflight, no
+      re-logged transition) — a retried push is idempotent, not merely
+      non-erroring; and
+    - a push arriving after the request was cancelled/failed is recorded but
+      never advances the Step, honoring the "halt-no-rollback, no further
+      advance" guarantee (#21).
     """
-    steps = session.scalars(select(Step).where(Step.status == "pr_open")).all()
-    for step in steps:
-        if step.request.status in TERMINAL_REQUEST_STATUSES:
-            continue
-        try:
-            with correlate(request_id=step.request_id, step_key=step.key, ordinal=step.ordinal):
-                plan = github_client.get_plan(step.pr_number)
-        except PlanNotReadyError:
-            continue
-        step.plan_ref = plan
-        _transition(step, "awaiting_approval")
+    if outcome not in APPLY_OUTCOMES:
+        raise ValueError(f"Unknown apply outcome: {outcome!r}")
+
+    step.tf_console = tf_console
+
+    if outcome == "done":
+        for key, value in outputs.items():
+            existing = session.scalars(
+                select(Output).where(Output.step_id == step.id, Output.key == key)
+            ).one_or_none()
+            if existing is None:
+                session.add(Output(id=str(uuid.uuid4()), step_id=step.id, key=key, value=value))
+            else:
+                existing.value = value
+        if _can_advance(step):
+            _land_after_postflight(session, step)
+        session.commit()
+        return
+
+    # failed / rejected — a terminal outcome with nothing to run.
+    if _can_advance(step):
+        _transition(step, outcome)
         _roll_up_request(session, step.request_id)
     session.commit()
 
 
-def _advance_awaiting_approval(session: Session, github_client: GitHubClient) -> None:
-    steps = session.scalars(select(Step).where(Step.status == "awaiting_approval")).all()
-    for step in steps:
-        if step.request.status in TERMINAL_REQUEST_STATUSES:
-            continue
-        with correlate(request_id=step.request_id, step_key=step.key, ordinal=step.ordinal):
-            pr_status = github_client.get_pull_request_status(step.pr_number)
-        if pr_status.merged:
-            if _produced_outputs_present(session, step):
-                _transition_to_applied(session, step)
-                continue
-            next_status = "applying"
-        elif pr_status.closed:
-            next_status = "rejected"
-            logger.warning(
-                "step_rejected request_id=%s step=%s ordinal=%s pr_number=%s (PR closed unmerged)",
-                step.request_id,
-                step.key,
-                step.ordinal,
-                step.pr_number,
-            )
-        else:
-            continue
-        _transition(step, next_status)
-        _roll_up_request(session, step.request_id)
-    session.commit()
-
-
-def _advance_applying(session: Session) -> None:
-    """A Step parked at `applying` is waiting on its GitHub Action's Lakebase
-    output write (ADR-0002); nothing to poll here (that's `_advance_awaiting_
-    approval`'s job) — just check whether the write has landed since the last
-    tick, per architecture.md §14's "hold rather than open the next PR with a
-    blank reference."
+def _can_advance(step: Step) -> bool:
+    """A submitted Step may advance on a push only while its request is still
+    live — a cancelled/failed request stays halted (#21), and a Step that
+    already reached a terminal status is not re-transitioned (idempotent retry).
     """
-    steps = session.scalars(select(Step).where(Step.status == "applying")).all()
-    for step in steps:
-        if _produced_outputs_present(session, step):
-            _transition_to_applied(session, step)
-    session.commit()
+    return step.status == "submitted" and step.request.status not in TERMINAL_REQUEST_STATUSES
 
 
-def _transition_to_applied(session: Session, step: Step) -> None:
-    """Run this Step's postflight hooks and land it at `applied` — or, if a
-    hook raises, at `apply_failed`. The single site both `merged` collapse
-    paths funnel through (an immediate merged->applied in `_advance_awaiting_
-    approval` for a Step with no Outputs to wait on, and a delayed one via
-    `_advance_applying` once its Outputs land) so postflight always runs
-    exactly once, right after the Step's apply-derived Outputs (if any) have
-    landed.
+def _land_after_postflight(session: Session, step: Step) -> None:
+    """Run a done Step's postflight hooks and land it at `done` — or, if a hook
+    raises, at `failed`. Postflight runs exactly once, right after CI's `done`
+    push has persisted the Step's apply-derived Outputs.
     """
     spec = _build_step_spec(step)
     try:
@@ -375,82 +380,23 @@ def _transition_to_applied(session: Session, step: Step) -> None:
             step.key,
             step.ordinal,
         )
-        _transition(step, "apply_failed")
+        _transition(step, "failed")
     else:
-        _transition(step, "applied")
+        _transition(step, "done")
     _roll_up_request(session, step.request_id)
 
 
-def record_apply_result(
-    session: Session,
-    step: Step,
-    applied: bool,
-    outputs: dict[str, Any],
-    tf_console: str,
-) -> None:
-    """Persist a merged Step's reported apply result (ADR-0003 — the future
-    `PUT .../steps/{n}/outputs` calls straight into this). #54 is the
-    HTTP-free persistence seam: today's only caller is a test; the endpoint
-    itself is #55.
-
-    `tf_console` is always stored, applied or not. `applied=False` moves the
-    Step to `apply_failed` through `_transition` (the #41 log line +
-    `status_changed_at`) — a status that didn't exist before this: a Step
-    previously only ever reached `applying` after merge, with no way to
-    report that the apply itself failed.
-
-    `applied=True` upserts each of `outputs` into `Output`, keyed by
-    `(step_id, key)`, by overwriting an existing row's `value` in place
-    rather than re-`add`ing one — a plain insert would trip
-    `uq_output_step_key` on a retried report, so this makes a duplicate
-    report with identical values a no-op. It then re-checks the same
-    `_produced_outputs_present` gate `_advance_applying` polls every tick and,
-    if the Step's full `produces` set is now present, advances it to
-    `applied` immediately via `_transition_to_applied` — **this seam
-    transitions directly**, rather than leaving it for the next reconcile
-    tick, so a caller never needs a follow-up `tick()` to see the Step land.
-    A partial report (not every `produces` key present yet) leaves the Step
-    held at `applying`, exactly as a partial/late ADR-0002-style write would.
-
-    Both branches only transition while the Step is still `applying` — a
-    repeated report against an already-`applied`/`apply_failed` Step still
-    updates `tf_console`/outputs but does not re-transition (no re-run
-    postflight hooks, no re-logged transition), keeping a retried report
-    idempotent rather than merely non-erroring.
-    """
-    step.tf_console = tf_console
-
-    if not applied:
-        if step.status == "applying":
-            _transition(step, "apply_failed")
-            _roll_up_request(session, step.request_id)
-        session.commit()
-        return
-
-    for key, value in outputs.items():
-        existing = session.scalars(
-            select(Output).where(Output.step_id == step.id, Output.key == key)
-        ).one_or_none()
-        if existing is None:
-            session.add(Output(id=str(uuid.uuid4()), step_id=step.id, key=key, value=value))
-        else:
-            existing.value = value
-
-    if step.status == "applying" and _produced_outputs_present(session, step):
-        _transition_to_applied(session, step)
-    session.commit()
-
-
 def _flag_stuck_steps(session: Session, stuck_threshold_seconds: float | None) -> None:
-    """Flag any Step held at `applying` past the threshold (architecture.md §14).
+    """Flag any Step held at `submitted` past the threshold (ADR-0004).
 
-    A merged Step with apply-derived Outputs waits at `applying` for its Action
-    to write them (ADR-0002); if the Action never does, the Step is stuck
-    forever and nothing tells the human. Set `stuck` (queryable via the API,
-    alertable via the log) the first tick a Step crosses the threshold, and log
-    a single WARNING then — the `Step.stuck == False` guard is what keeps the
-    ~15s driver from re-logging it every pass. `_transition` clears the flag if
-    the outputs later arrive, so it never goes stale.
+    A submitted Step is waiting for CI's terminal push (`done`/`failed`/
+    `rejected`). If that push never fires — the on-close job errors, an apply
+    hangs, CI is misconfigured — the Step would sit at `submitted` forever and
+    nothing would tell the human. Set `stuck` (queryable via the API, alertable
+    via the log) the first tick a Step crosses the threshold, and log a single
+    WARNING then — the `Step.stuck == False` guard is what keeps the ~15s driver
+    from re-logging it every pass. `_transition` clears the flag if the push
+    later arrives, so it never goes stale.
     """
     threshold = (
         stuck_threshold_seconds
@@ -460,13 +406,13 @@ def _flag_stuck_steps(session: Session, stuck_threshold_seconds: float | None) -
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=threshold)
     candidates = session.scalars(
         select(Step).where(
-            Step.status == "applying",
+            Step.status == "submitted",
             Step.stuck.is_(False),
             Step.status_changed_at < cutoff,
         )
     ).all()
-    # A Step left at `applying` under a halted request (an operator cancel, or
-    # a sibling Step's failure — #21) isn't "stuck holding for a human": the
+    # A Step left at `submitted` under a halted request (an operator cancel, or
+    # a sibling Step's failure — #21) isn't "stuck waiting for a push": the
     # request already stopped and the operator knows, so flagging it would be
     # noise. Only Steps of a still-live request are surfaced.
     newly_stuck = [s for s in candidates if s.request.status not in TERMINAL_REQUEST_STATUSES]
@@ -474,8 +420,8 @@ def _flag_stuck_steps(session: Session, stuck_threshold_seconds: float | None) -
         step.stuck = True
         held_for = datetime.now(timezone.utc) - step.status_changed_at
         logger.warning(
-            "step_stuck request_id=%s step=%s ordinal=%s status=applying held_for=%.0fs "
-            "(no ADR-0002 output write; holding for a human)",
+            "step_stuck request_id=%s step=%s ordinal=%s status=submitted held_for=%.0fs "
+            "(no terminal CI push received; awaiting a human)",
             step.request_id,
             step.key,
             step.ordinal,
@@ -496,10 +442,8 @@ def _roll_up_request(session: Session, request_id: str) -> None:
     steps = request.steps
     if any(s.status in _FAILED_STEP_STATUSES for s in steps):
         request.status = "failed"
-    elif all(s.status == "applied" for s in steps):
+    elif all(s.status == "done" for s in steps):
         request.status = "succeeded"
-    elif any(s.status == "awaiting_approval" for s in steps):
-        request.status = "awaiting_approval"
     else:
         request.status = "in_progress"
 

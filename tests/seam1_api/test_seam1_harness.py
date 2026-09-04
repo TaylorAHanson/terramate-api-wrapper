@@ -45,15 +45,14 @@ def test_fake_github_client_records_opened_pull_requests():
     assert ref.number == 1
     assert len(fake.opened_pull_requests) == 1
     assert fake.opened_pull_requests[0].branch_name == "provision/demo"
-    assert fake.get_pull_request_status(ref.number).merged is False
 
 
-def test_fake_github_client_can_simulate_a_rejected_pr():
+def test_fake_github_client_numbers_prs_in_the_order_opened():
+    """Per ADR-0004 the client only opens PRs — no status is faked; a Step's
+    terminal outcome is driven through the `PUT .../outputs` ingress instead."""
     fake = FakeGitHubClient()
-    ref = fake.open_pull_request(branch_name="provision/demo", base_branch="main", title="t", body="b")
+    first = fake.open_pull_request(branch_name="provision/a", base_branch="main", title="a", body="b")
+    second = fake.open_pull_request(branch_name="provision/b", base_branch="main", title="b", body="b")
 
-    fake.closed_unmerged_pr_numbers.add(ref.number)
-
-    status = fake.get_pull_request_status(ref.number)
-    assert status.closed is True
-    assert status.merged is False
+    assert (first.number, second.number) == (1, 2)
+    assert [pr.branch_name for pr in fake.opened_pull_requests] == ["provision/a", "provision/b"]

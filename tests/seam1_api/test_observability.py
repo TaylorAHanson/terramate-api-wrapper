@@ -4,8 +4,9 @@ A deployed operator's only window into the reconcile loop is its logs, so the
 orchestrator must emit a `step_transition` line for every status change, a
 `pr_opened` line when it opens a PR, and a `request_rollup` line when a
 request's rollup status moves — each carrying the correlating `request_id`.
-Driven through `orchestrator.tick()` directly (like test_reconcile_loop.py),
-with `caplog` asserting the lines, against a real test Lakebase + fake GitHub.
+Driven through `orchestrator.tick()` and the `PUT .../outputs` ingress (like
+test_reconcile_loop.py), with `caplog` asserting the lines, against a real test
+Lakebase + fake GitHub.
 """
 from __future__ import annotations
 
@@ -50,6 +51,9 @@ def _create_schema_request(name: str) -> str:
     return response.json()["request_id"]
 
 
+_CI_HEADERS = {"X-Forwarded-User": "ci-tester"}
+
+
 def _events_for(caplog, request_id: str) -> list[str]:
     """The orchestrator log messages that name this request_id — so a
     concurrently-cleaned or stray row's lines never bleed into the assertion."""
@@ -60,11 +64,17 @@ def _events_for(caplog, request_id: str) -> list[str]:
     ]
 
 
-def test_opening_a_pr_logs_pr_opened_and_the_queued_to_awaiting_transition(db_session, caplog):
-    """(#45) `queued` now passes through the persisted `pr_open` sub-state on
-    its way to `awaiting_approval` — both `step_transition` lines are logged,
-    even though a fake's instant `get_plan` walks through both in one tick.
-    """
+def _report(request_id: str, ordinal: int, **body):
+    return client.put(
+        f"/v1/requests/{request_id}/steps/{ordinal}/outputs",
+        headers=_CI_HEADERS,
+        json={"status": "done", "outputs": {}, "tf_console": "", **body},
+    )
+
+
+def test_opening_a_pr_logs_pr_opened_and_the_queued_to_submitted_transition(db_session, caplog):
+    """(ADR-0004) opening a PR moves the Step straight to the single
+    `submitted` state — no plan/approval sub-states to walk through."""
     request_id = _create_schema_request("bronze")
     fake = FakeGitHubClient()
 
@@ -73,36 +83,33 @@ def test_opening_a_pr_logs_pr_opened_and_the_queued_to_awaiting_transition(db_se
 
     messages = _events_for(caplog, request_id)
     assert any(m.startswith("pr_opened") and "pr_number=1" in m for m in messages)
-    assert any(m.startswith("step_transition") and "from=queued to=pr_open" in m for m in messages)
-    assert any(m.startswith("step_transition") and "from=pr_open to=awaiting_approval" in m for m in messages)
-    assert any(m.startswith("request_rollup") and "to=awaiting_approval" in m for m in messages)
+    assert any(m.startswith("step_transition") and "from=queued to=submitted" in m for m in messages)
+    assert any(m.startswith("request_rollup") and "to=in_progress" in m for m in messages)
 
 
-def test_a_merge_logs_the_applied_transition_and_the_succeeded_rollup(db_session, caplog):
+def test_a_done_push_logs_the_done_transition_and_the_succeeded_rollup(db_session, caplog):
     request_id = _create_schema_request("silver")
     fake = FakeGitHubClient()
     orchestrator.tick(db_session, fake)
-    fake.merged_pr_numbers.add(1)
 
     with caplog.at_level(logging.INFO, logger="server.orchestrator"):
-        orchestrator.tick(db_session, fake)
+        _report(request_id, 0, status="done")
 
     messages = _events_for(caplog, request_id)
-    assert any(m.startswith("step_transition") and "to=applied" in m for m in messages)
+    assert any(m.startswith("step_transition") and "to=done" in m for m in messages)
     assert any(m.startswith("request_rollup") and "to=succeeded" in m for m in messages)
 
 
-def test_a_rejection_logs_a_warning_and_the_failed_rollup(db_session, caplog):
+def test_a_rejected_push_logs_the_rejected_transition_and_the_failed_rollup(db_session, caplog):
     request_id = _create_schema_request("gold")
     fake = FakeGitHubClient()
     orchestrator.tick(db_session, fake)
-    fake.closed_unmerged_pr_numbers.add(1)
 
     with caplog.at_level(logging.INFO, logger="server.orchestrator"):
-        orchestrator.tick(db_session, fake)
+        _report(request_id, 0, status="rejected")
 
     messages = _events_for(caplog, request_id)
-    assert any(m.startswith("step_rejected") for m in messages)
+    assert any(m.startswith("step_transition") and "to=rejected" in m for m in messages)
     assert any(m.startswith("request_rollup") and "to=failed" in m for m in messages)
 
 

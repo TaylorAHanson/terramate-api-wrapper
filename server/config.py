@@ -48,10 +48,10 @@ class Settings:
     # surfaces the per-call GitHub transport lines.
     log_level: str
 
-    # How long a Step may sit at `applying` (waiting on its Action's ADR-0002
-    # output write) before the reconcile loop flags it `stuck` and logs a
-    # warning (server.orchestrator, #43). Conservative by default so a merely-
-    # slow apply doesn't false-positive.
+    # How long a Step may sit at `submitted` (waiting for CI's terminal push —
+    # ADR-0004) before the reconcile loop flags it `stuck` and logs a warning
+    # (server.orchestrator, #43). Conservative by default so a merely-slow
+    # apply doesn't false-positive.
     step_stuck_threshold_seconds: float
 
     # The forwarded identities (Databricks Apps `X-Forwarded-Email` /

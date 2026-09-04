@@ -1,5 +1,11 @@
-"""`RealGitHubClient` (#22): the Git Data API commit/PR/status/plan sequence,
-against a mocked GitHub API (respx) — no real network, no real repo.
+"""`RealGitHubClient` (#22, ADR-0004): the Git Data API commit/PR sequence and
+the transport's retry/backoff, against a mocked GitHub API (respx) — no real
+network, no real repo.
+
+Per ADR-0004 the client only opens PRs — it no longer reads PR status or the
+`terraform-plan` check run — so the transport-retry tests exercise the retry
+layer through the internal `_get` directly (the layer under test) rather than
+through a removed status method.
 """
 from __future__ import annotations
 
@@ -10,12 +16,13 @@ import httpx
 import pytest
 import respx
 
-from server.github_client import GitHubClientError, PlanNotReadyError, RealGitHubClient, correlate
+from server.github_client import GitHubClientError, RealGitHubClient, correlate
 from server.recipes.framework import AddFile, EditFile
 
 REPO = "acme/fixture-repo"
 BASE_URL = "https://api.github.com"
 TOKEN = "ghp_supersecrettoken"
+_ARBITRARY_PATH = f"/repos/{REPO}/pulls/9"
 
 
 @pytest.fixture()
@@ -139,78 +146,6 @@ def test_open_pull_request_applies_an_edit_file_patch_to_fetched_content(client)
 
 
 @respx.mock
-def test_get_pull_request_status_reports_merged(client):
-    respx.get(f"{BASE_URL}/repos/{REPO}/pulls/9").mock(
-        return_value=httpx.Response(200, json={"merged": True, "merged_at": "2026-01-01", "state": "closed"})
-    )
-    status = client.get_pull_request_status(9)
-    assert status.merged is True
-    assert status.closed is True
-
-
-@respx.mock
-def test_get_pull_request_status_reports_open(client):
-    respx.get(f"{BASE_URL}/repos/{REPO}/pulls/9").mock(
-        return_value=httpx.Response(200, json={"merged": False, "merged_at": None, "state": "open"})
-    )
-    status = client.get_pull_request_status(9)
-    assert status.merged is False
-    assert status.closed is False
-
-
-@respx.mock
-def test_get_pull_request_status_reports_closed_unmerged(client):
-    respx.get(f"{BASE_URL}/repos/{REPO}/pulls/9").mock(
-        return_value=httpx.Response(200, json={"merged": False, "merged_at": None, "state": "closed"})
-    )
-    status = client.get_pull_request_status(9)
-    assert status.merged is False
-    assert status.closed is True
-
-
-@respx.mock
-def test_get_plan_returns_the_terraform_plan_check_run_text(client):
-    respx.get(f"{BASE_URL}/repos/{REPO}/pulls/9").mock(
-        return_value=httpx.Response(200, json={"head": {"sha": "head-sha"}})
-    )
-    respx.get(f"{BASE_URL}/repos/{REPO}/commits/head-sha/check-runs").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "check_runs": [
-                    {"name": "other-check", "status": "completed", "output": {}},
-                    {
-                        "name": "terraform-plan",
-                        "status": "completed",
-                        "output": {"text": "Plan: 1 to add, 0 to change, 0 to destroy."},
-                    },
-                ]
-            },
-        )
-    )
-
-    plan = client.get_plan(9)
-    assert plan == "Plan: 1 to add, 0 to change, 0 to destroy."
-
-
-@respx.mock
-def test_get_plan_raises_plan_not_ready_without_blocking_when_the_check_run_has_not_completed_yet(client):
-    """(#45) A single, immediate check — never an internal sleep/poll loop.
-    The orchestrator's `_advance_pr_open` is what re-checks across ticks."""
-    respx.get(f"{BASE_URL}/repos/{REPO}/pulls/9").mock(
-        return_value=httpx.Response(200, json={"head": {"sha": "head-sha"}})
-    )
-    check_runs_route = respx.get(f"{BASE_URL}/repos/{REPO}/commits/head-sha/check-runs").mock(
-        return_value=httpx.Response(200, json={"check_runs": []})
-    )
-
-    with pytest.raises(PlanNotReadyError):
-        client.get_plan(9)
-
-    assert check_runs_route.call_count == 1
-
-
-@respx.mock
 def test_a_failed_github_call_raises_github_client_error(client):
     route = respx.get(f"{BASE_URL}/repos/{REPO}/git/ref/heads/main").mock(
         return_value=httpx.Response(404, json={"message": "Not Found"})
@@ -267,58 +202,27 @@ def test_open_pull_request_logs_the_opened_pr(client, caplog):
     assert opened and "pr_number=7" in opened[0]
 
 
-@respx.mock
-def test_get_plan_logs_ready_on_success(client, caplog):
-    respx.get(f"{BASE_URL}/repos/{REPO}/pulls/9").mock(
-        return_value=httpx.Response(200, json={"head": {"sha": "head-sha"}})
-    )
-    respx.get(f"{BASE_URL}/repos/{REPO}/commits/head-sha/check-runs").mock(
-        return_value=httpx.Response(
-            200,
-            json={"check_runs": [{"name": "terraform-plan", "status": "completed", "output": {"text": "ok"}}]},
-        )
-    )
-
-    with caplog.at_level(logging.INFO, logger="server.github_client"):
-        client.get_plan(9)
-
-    events = {r.message.split()[0] for r in caplog.records}
-    assert "github_plan_ready" in events
-
-
-@respx.mock
-def test_get_plan_logs_not_ready_at_debug(client, caplog):
-    respx.get(f"{BASE_URL}/repos/{REPO}/pulls/9").mock(
-        return_value=httpx.Response(200, json={"head": {"sha": "head-sha"}})
-    )
-    respx.get(f"{BASE_URL}/repos/{REPO}/commits/head-sha/check-runs").mock(
-        return_value=httpx.Response(200, json={"check_runs": []})
-    )
-
-    with caplog.at_level(logging.DEBUG, logger="server.github_client"):
-        with pytest.raises(PlanNotReadyError):
-            client.get_plan(9)
-
-    assert any(r.message.startswith("github_plan_not_ready") for r in caplog.records)
-
-
 # -- transient retry / backoff (#45) ---------------------------------------
+#
+# The retry/backoff lives in the transport (`_request`, under `_get`/`_post`),
+# shared by every call open_pull_request makes; these drive it through `_get`
+# directly since ADR-0004 removed the status methods that used to exercise it.
 
 
 @respx.mock
 def test_a_transient_5xx_then_success_recovers(client, monkeypatch):
     sleeps: list[float] = []
     monkeypatch.setattr("server.github_client.time.sleep", sleeps.append)
-    route = respx.get(f"{BASE_URL}/repos/{REPO}/pulls/9").mock(
+    route = respx.get(f"{BASE_URL}{_ARBITRARY_PATH}").mock(
         side_effect=[
             httpx.Response(503, text="unavailable"),
-            httpx.Response(200, json={"merged": True, "merged_at": "2026-01-01", "state": "closed"}),
+            httpx.Response(200, json={"ok": True}),
         ]
     )
 
-    status = client.get_pull_request_status(9)
+    result = client._get(_ARBITRARY_PATH)
 
-    assert status.merged is True
+    assert result == {"ok": True}
     assert route.call_count == 2
     assert sleeps == [1.0]  # base backoff on the first retry
 
@@ -327,16 +231,16 @@ def test_a_transient_5xx_then_success_recovers(client, monkeypatch):
 def test_a_429_honors_the_retry_after_header_over_exponential_backoff(client, monkeypatch):
     sleeps: list[float] = []
     monkeypatch.setattr("server.github_client.time.sleep", sleeps.append)
-    route = respx.get(f"{BASE_URL}/repos/{REPO}/pulls/9").mock(
+    route = respx.get(f"{BASE_URL}{_ARBITRARY_PATH}").mock(
         side_effect=[
             httpx.Response(429, headers={"Retry-After": "7"}, text="rate limited"),
-            httpx.Response(200, json={"merged": False, "merged_at": None, "state": "open"}),
+            httpx.Response(200, json={"ok": True}),
         ]
     )
 
-    status = client.get_pull_request_status(9)
+    result = client._get(_ARBITRARY_PATH)
 
-    assert status.merged is False
+    assert result == {"ok": True}
     assert route.call_count == 2
     assert sleeps == [7.0]
 
@@ -344,10 +248,10 @@ def test_a_429_honors_the_retry_after_header_over_exponential_backoff(client, mo
 @respx.mock
 def test_a_non_transient_4xx_other_than_429_is_never_retried(client, monkeypatch):
     monkeypatch.setattr("server.github_client.time.sleep", lambda _seconds: pytest.fail("must not sleep/retry"))
-    route = respx.get(f"{BASE_URL}/repos/{REPO}/pulls/9").mock(return_value=httpx.Response(422, text="unprocessable"))
+    route = respx.get(f"{BASE_URL}{_ARBITRARY_PATH}").mock(return_value=httpx.Response(422, text="unprocessable"))
 
     with pytest.raises(GitHubClientError):
-        client.get_pull_request_status(9)
+        client._get(_ARBITRARY_PATH)
 
     assert route.call_count == 1
 
@@ -356,13 +260,13 @@ def test_a_non_transient_4xx_other_than_429_is_never_retried(client, monkeypatch
 def test_retry_exhaustion_surfaces_the_underlying_error(monkeypatch):
     monkeypatch.setattr("server.github_client.time.sleep", lambda _seconds: None)
     exhausting_client = RealGitHubClient(repo=REPO, token="test-token", base_url=BASE_URL, max_retries=2)
-    route = respx.get(f"{BASE_URL}/repos/{REPO}/pulls/9").mock(
+    route = respx.get(f"{BASE_URL}{_ARBITRARY_PATH}").mock(
         return_value=httpx.Response(503, text="still unavailable")
     )
 
     try:
         with pytest.raises(GitHubClientError):
-            exhausting_client.get_pull_request_status(9)
+            exhausting_client._get(_ARBITRARY_PATH)
     finally:
         exhausting_client.close()
 
@@ -373,13 +277,13 @@ def test_retry_exhaustion_surfaces_the_underlying_error(monkeypatch):
 def test_retry_attempts_and_exhaustion_are_logged_with_correlating_ids(monkeypatch, caplog):
     monkeypatch.setattr("server.github_client.time.sleep", lambda _seconds: None)
     correlating_client = RealGitHubClient(repo=REPO, token="test-token", base_url=BASE_URL, max_retries=1)
-    respx.get(f"{BASE_URL}/repos/{REPO}/pulls/9").mock(return_value=httpx.Response(503, text="down"))
+    respx.get(f"{BASE_URL}{_ARBITRARY_PATH}").mock(return_value=httpx.Response(503, text="down"))
 
     try:
         with caplog.at_level(logging.WARNING, logger="server.github_client"):
             with correlate(request_id="req-1", step_key="create", ordinal=0):
                 with pytest.raises(GitHubClientError):
-                    correlating_client.get_pull_request_status(9)
+                    correlating_client._get(_ARBITRARY_PATH)
     finally:
         correlating_client.close()
 

@@ -4,7 +4,6 @@ import {
   getBuildInfo,
   getIntakeGate,
   getRequest,
-  getStepPlan,
   setIntakeGate,
   type BuildInfo,
   type IntakeGate,
@@ -13,9 +12,9 @@ import {
 } from "./api";
 
 // The status + operator-controls UI (architecture.md §11/§15.2): paste a
-// request_id, see its status and Steps (including awaiting_approval), read a
-// Step's terraform plan once it has one (#19), cancel an in-flight request,
-// and flip the global intake off-switch (#21).
+// request_id, see its status and Steps, cancel an in-flight request, and flip
+// the global intake off-switch (#21). Per ADR-0004 the API no longer surfaces
+// a Step's terraform plan — reviewers read it on the PR itself.
 export default function App() {
   const [buildInfo, setBuildInfo] = useState<BuildInfo | null>(null);
   const [buildError, setBuildError] = useState<string | null>(null);
@@ -153,12 +152,11 @@ function RequestView({ request, onChanged }: { request: RequestDetail; onChanged
             <th>Key</th>
             <th>Status</th>
             <th>PR</th>
-            <th>Plan</th>
           </tr>
         </thead>
         <tbody>
           {request.steps.map((step) => (
-            <StepRow key={step.ordinal} requestId={request.id} step={step} />
+            <StepRow key={step.ordinal} step={step} />
           ))}
         </tbody>
       </table>
@@ -166,54 +164,29 @@ function RequestView({ request, onChanged }: { request: RequestDetail; onChanged
   );
 }
 
-function StepRow({ requestId, step }: { requestId: string; step: Step }) {
-  const [plan, setPlan] = useState<string | null>(null);
-  const [planError, setPlanError] = useState<string | null>(null);
-
-  const loadPlan = () => {
-    setPlanError(null);
-    getStepPlan(requestId, step.ordinal)
-      .then((result) => setPlan(result.plan))
-      .catch((err: Error) => setPlanError(err.message));
-  };
-
+function StepRow({ step }: { step: Step }) {
   return (
-    <>
-      <tr>
-        <td>{step.ordinal}</td>
-        <td>{step.key}</td>
-        <td>
-          {step.status}
-          {step.stuck && (
-            <span role="alert" title="Held at applying past the threshold — the apply Action never wrote its outputs (#43)">
-              {" "}
-              ⚠ stuck
-            </span>
-          )}
-        </td>
-        <td>
-          {step.pr_url ? (
-            <a href={step.pr_url} target="_blank" rel="noreferrer">
-              #{step.pr_number}
-            </a>
-          ) : (
-            "—"
-          )}
-        </td>
-        <td>
-          <button type="button" onClick={loadPlan}>
-            View plan
-          </button>
-          {planError && <span role="alert"> {planError}</span>}
-        </td>
-      </tr>
-      {plan && (
-        <tr>
-          <td colSpan={5}>
-            <pre>{plan}</pre>
-          </td>
-        </tr>
-      )}
-    </>
+    <tr>
+      <td>{step.ordinal}</td>
+      <td>{step.key}</td>
+      <td>
+        {step.status}
+        {step.stuck && (
+          <span role="alert" title="Held at submitted past the threshold — CI's terminal push never arrived (#43, ADR-0004)">
+            {" "}
+            ⚠ stuck
+          </span>
+        )}
+      </td>
+      <td>
+        {step.pr_url ? (
+          <a href={step.pr_url} target="_blank" rel="noreferrer">
+            #{step.pr_number}
+          </a>
+        ) : (
+          "—"
+        )}
+      </td>
+    </tr>
   );
 }

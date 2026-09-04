@@ -1,13 +1,13 @@
-"""Seam 1: a Step held at `applying` past the threshold is surfaced as `stuck`
-(#43) — real HTTP + a real test Lakebase, only GitHubClient faked.
+"""Seam 1: a Step held at `submitted` past the threshold is surfaced as `stuck`
+(#43, repurposed by ADR-0004) — real HTTP + a real test Lakebase, only
+GitHubClient faked.
 
-architecture.md §14 holds a merged Step at `applying` until its Action reports
-the ADR-0003 outputs over HTTP; if the Action never does, the Step is silent
-forever. These tests drive the `workspace` Recipe's `create` Step into
-`applying` (merged, but its `workspace_id` output not yet reported), then
-prove the reconcile loop flags it `stuck` once past the threshold, logs it
-exactly once, exposes it on the API, and clears it when the report finally
-arrives via the real `PUT .../steps/{n}/outputs` ingress (#55).
+ADR-0004 leaves a Step at `submitted` (PR open) until CI pushes a terminal
+outcome; if that push never arrives, the Step is silent forever. These tests
+drive the `workspace` Recipe's `create` Step into `submitted`, then prove the
+reconcile loop flags it `stuck` once past the threshold, logs it exactly once,
+exposes it on the API, and clears it when the push finally arrives via the real
+`PUT .../steps/{n}/outputs` ingress (#55).
 """
 from __future__ import annotations
 
@@ -65,15 +65,12 @@ def _get_request(request_id: str) -> dict:
     return response.json()
 
 
-def _drive_create_into_applying(db_session, request_id: str) -> None:
-    """create's PR opens, is merged, and — with no output written yet — the
-    Step parks at `applying` (the silent hold #43 makes visible)."""
+def _drive_create_into_submitted(db_session, request_id: str) -> None:
+    """create's PR opens and the Step parks at `submitted`, waiting for CI's
+    terminal push (the silent hold #43 makes visible)."""
     fake = FakeGitHubClient()
-    orchestrator.tick(db_session, fake)  # create -> awaiting_approval
-    create_pr = _step(_get_request(request_id), "create")["pr_number"]
-    fake.merged_pr_numbers.add(create_pr)
-    orchestrator.tick(db_session, fake)  # merged, output absent -> applying
-    assert _step(_get_request(request_id), "create")["status"] == "applying"
+    orchestrator.tick(db_session, fake)  # create -> submitted (PR opened)
+    assert _step(_get_request(request_id), "create")["status"] == "submitted"
 
 
 def _age_status(db_session, request_id: str, key: str, seconds: float) -> None:
@@ -94,9 +91,9 @@ def _stuck_logs(caplog, request_id: str) -> list:
     ]
 
 
-def test_a_step_held_at_applying_past_the_threshold_is_flagged_and_logged_once(db_session, caplog):
+def test_a_step_held_at_submitted_past_the_threshold_is_flagged_and_logged_once(db_session, caplog):
     request_id = _create_workspace_request("analytics")
-    _drive_create_into_applying(db_session, request_id)
+    _drive_create_into_submitted(db_session, request_id)
     _age_status(db_session, request_id, "create", seconds=7200)  # 2h — well past default 3600
 
     fake = FakeGitHubClient()
@@ -106,7 +103,7 @@ def test_a_step_held_at_applying_past_the_threshold_is_flagged_and_logged_once(d
     assert _step(_get_request(request_id), "create")["stuck"] is True
     logs = _stuck_logs(caplog, request_id)
     assert len(logs) == 1
-    assert "status=applying" in logs[0].message and "held_for=" in logs[0].message
+    assert "status=submitted" in logs[0].message and "held_for=" in logs[0].message
 
     # A second tick must NOT re-log it — the persisted flag is what stops the
     # ~15s driver spamming a warning every pass.
@@ -117,44 +114,43 @@ def test_a_step_held_at_applying_past_the_threshold_is_flagged_and_logged_once(d
     assert _step(_get_request(request_id), "create")["stuck"] is True
 
 
-def test_a_freshly_applying_step_is_not_flagged(db_session):
+def test_a_freshly_submitted_step_is_not_flagged(db_session):
     request_id = _create_workspace_request("reporting")
-    _drive_create_into_applying(db_session, request_id)  # status_changed_at is ~now
+    _drive_create_into_submitted(db_session, request_id)  # status_changed_at is ~now
 
     orchestrator.tick(db_session, FakeGitHubClient())  # default threshold (3600s)
 
     assert _step(_get_request(request_id), "create")["stuck"] is False
 
 
-def test_stuck_flag_clears_when_the_output_finally_arrives(db_session):
+def test_stuck_flag_clears_when_the_push_finally_arrives(db_session):
     request_id = _create_workspace_request("finance")
-    _drive_create_into_applying(db_session, request_id)
+    _drive_create_into_submitted(db_session, request_id)
     _age_status(db_session, request_id, "create", seconds=7200)
 
     orchestrator.tick(db_session, FakeGitHubClient())
     assert _step(_get_request(request_id), "create")["stuck"] is True
 
-    # The Action's ADR-0003 report finally lands; the next tick advances
-    # create to `applied` and the stuck flag clears with the transition.
+    # CI's ADR-0004 terminal push finally lands; the Step advances to `done`
+    # and the stuck flag clears with the transition.
     create_ordinal = _step(_get_request(request_id), "create")["ordinal"]
     report = client.put(
         f"/v1/requests/{request_id}/steps/{create_ordinal}/outputs",
         headers={"X-Forwarded-User": "ci-tester"},
-        json={"applied": True, "outputs": {"workspace_id": "ws-42"}, "tf_console": "Apply complete!"},
+        json={"status": "done", "outputs": {"workspace_id": "ws-42"}, "tf_console": "Apply complete!"},
     )
     assert report.status_code == 200
 
-    orchestrator.tick(db_session, FakeGitHubClient())
     create_after = _step(_get_request(request_id), "create")
-    assert create_after["status"] == "applied"
+    assert create_after["status"] == "done"
     assert create_after["stuck"] is False
 
 
 def test_a_step_under_a_cancelled_request_is_not_flagged_stuck(db_session):
     """A halted request (#21) already stopped and the operator knows, so a Step
-    left at `applying` under it is not surfaced as stuck-holding-for-a-human."""
+    left at `submitted` under it is not surfaced as stuck-holding-for-a-human."""
     request_id = _create_workspace_request("legal")
-    _drive_create_into_applying(db_session, request_id)
+    _drive_create_into_submitted(db_session, request_id)
     _age_status(db_session, request_id, "create", seconds=7200)
 
     assert client.post(f"/v1/requests/{request_id}/cancel").status_code == 200
