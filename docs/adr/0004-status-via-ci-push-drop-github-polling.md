@@ -1,6 +1,6 @@
 # 0004 — Status via CI push; drop GitHub polling
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-04
 - Supersedes the status-polling half of the design assumed by [0002](0002-output-capture-via-direct-lakebase-write.md) / [0003](0003-output-capture-via-action-api-put.md), architecture.md §4.2/§5/§6, and the plan-surfacing/PR-lifecycle work in #19/#45.
 
