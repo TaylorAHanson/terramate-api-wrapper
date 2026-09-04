@@ -18,11 +18,10 @@ export interface Step {
   status: string;
   pr_number: number | null;
   pr_url: string | null;
-  plan_ref: string | null;
   depends_on: string[];
-  // #43: true while held at `applying` past the stuck threshold (its Action
-  // never wrote the ADR-0002 outputs); status_changed_at is when it entered
-  // its current status.
+  // #43 (repurposed by ADR-0004): true while held at `submitted` past the
+  // stuck threshold (CI's terminal push never arrived); status_changed_at is
+  // when it entered its current status.
   stuck: boolean;
   status_changed_at: string;
 }
@@ -43,24 +42,6 @@ export async function getRequest(requestId: string): Promise<RequestDetail> {
   const response = await fetch(`/v1/requests/${requestId}`);
   if (!response.ok) {
     throw new Error(`GET /v1/requests/${requestId} failed: ${response.status}`);
-  }
-  return response.json();
-}
-
-export interface StepPlan {
-  ordinal: number;
-  key: string;
-  status: string;
-  plan: string;
-}
-
-export async function getStepPlan(requestId: string, ordinal: number): Promise<StepPlan> {
-  const response = await fetch(`/v1/requests/${requestId}/steps/${ordinal}/plan`);
-  if (response.status === 409) {
-    throw new Error("Plan not available yet");
-  }
-  if (!response.ok) {
-    throw new Error(`GET .../steps/${ordinal}/plan failed: ${response.status}`);
   }
   return response.json();
 }

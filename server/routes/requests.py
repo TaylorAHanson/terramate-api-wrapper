@@ -1,7 +1,6 @@
 """`POST /v1/requests`, `GET /v1/requests/{id}`,
-`GET /v1/requests/{id}/steps/{n}`, `GET /v1/requests/{id}/steps/{n}/plan`,
-`PUT /v1/requests/{id}/steps/{n}/outputs`, and `POST /v1/requests/{id}/cancel`
-(architecture.md §5, §6, §11).
+`GET /v1/requests/{id}/steps/{n}`, `PUT /v1/requests/{id}/steps/{n}/outputs`,
+and `POST /v1/requests/{id}/cancel` (architecture.md §5, §6, §11; ADR-0004).
 
 `POST` checks the intake gate (`server.intake_gate`, #21) is open, validates
 the body against its type's discriminated-union member (published in
@@ -9,20 +8,19 @@ the body against its type's discriminated-union member (published in
 ProvisioningRequest, and expands its type's Recipe into a persisted Playbook
 of one or more Steps — translating each StepSpec's `depends_on` (Step *keys*)
 into the Step *row ids* generated here, since those ids don't exist until
-insert time. The reconcile loop (`server.orchestrator`) then claims and
-advances that Playbook's Steps; the `/plan` route just reads back the
-`terraform plan` the loop captured once a Step has one, `/outputs` is the
-ADR-0003 ingress a Step's GitHub Action PUTs its apply result to (#55, gated
-on the CI M2M principal, delegating straight into `orchestrator.
-record_apply_result`, #54), and `/cancel` halts a request the same way a
-failed Step does.
+insert time. The reconcile loop (`server.orchestrator`) then opens PRs for the
+Playbook's runnable Steps; from there the API never polls GitHub (ADR-0004) —
+`/outputs` is the ingress a Step's CI reports its terminal outcome to (`done`
+with outputs, `failed`, or `rejected`; #55/ADR-0003, gated on the CI M2M
+principal, delegating straight into `orchestrator.record_apply_result`, #54),
+and `/cancel` halts a request the same way a failed Step does.
 """
 from __future__ import annotations
 
 import logging
 import uuid
 from datetime import datetime
-from typing import Annotated, Union
+from typing import Annotated, Literal, Union
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -65,11 +63,10 @@ class StepOut(BaseModel):
     status: str
     pr_number: int | None
     pr_url: str | None
-    plan_ref: str | None
     depends_on: list[str]
-    # Stuck-surfacing (#43): `stuck` is true while this Step has been held at
-    # `applying` past the threshold (its Action never wrote the ADR-0002
-    # outputs), so an operator sees it here without needing log access;
+    # Stuck-surfacing (#43, repurposed by ADR-0004): `stuck` is true while this
+    # Step has been held at `submitted` past the threshold (CI's terminal push
+    # never arrived), so an operator sees it here without needing log access;
     # `status_changed_at` is when it entered its current status.
     stuck: bool
     status_changed_at: datetime
@@ -94,7 +91,6 @@ def _step_to_out(step: Step) -> StepOut:
         status=step.status,
         pr_number=step.pr_number,
         pr_url=step.pr_url,
-        plan_ref=step.plan_ref,
         depends_on=step.depends_on,
         stuck=step.stuck,
         status_changed_at=step.status_changed_at,
@@ -224,29 +220,15 @@ def get_step(request_id: str, ordinal: int, session: Session = Depends(get_db)) 
     return _step_to_out(step)
 
 
-class StepPlanResponse(BaseModel):
-    ordinal: int
-    key: str
-    status: str
-    plan: str
-
-
-@router.get("/v1/requests/{request_id}/steps/{ordinal}/plan", response_model=StepPlanResponse)
-def get_step_plan(
-    request_id: str, ordinal: int, session: Session = Depends(get_db)
-) -> StepPlanResponse:
-    step = _find_step(session, request_id, ordinal)
-    if step is None:
-        raise HTTPException(status_code=404, detail="Step not found")
-    if step.plan_ref is None:
-        raise HTTPException(status_code=409, detail="Plan not available yet")
-    return StepPlanResponse(ordinal=step.ordinal, key=step.key, status=step.status, plan=step.plan_ref)
-
-
 class OutputReportRequest(BaseModel):
-    applied: bool
+    # CI's terminal outcome for the Step (ADR-0004): `done` (apply succeeded,
+    # `outputs` carries the apply-derived values), `failed` (apply ran and
+    # failed), or `rejected` (the PR was closed without merging). `outputs` and
+    # `tf_console` are optional — a `rejected` PR never applied, so it has
+    # neither.
+    status: Literal["done", "failed", "rejected"]
     outputs: dict = Field(default_factory=dict)
-    tf_console: str
+    tf_console: str = ""
 
 
 class OutputReportResponse(BaseModel):
@@ -255,16 +237,14 @@ class OutputReportResponse(BaseModel):
     status: str
 
 
-# The Step states a report may land on (ADR-0003, #55): `applying` is the
-# real case — a merged Step waiting on its Action's report — and
-# `applied`/`apply_failed` are a retried report against a Step this same
-# endpoint already resolved (record_apply_result makes an identical retry
-# there a no-op, see server.orchestrator). Any other status — the Step never
-# reached `applying` (`queued`/`pr_open`/`awaiting_approval`), or it resolved
-# some other way (`rejected`/`plan_failed`) — means the report doesn't match
-# reality, so it's rejected rather than blindly overwriting `tf_console`/
-# outputs on a Step nothing is waiting on.
-_REPORTABLE_STEP_STATUSES = {"applying", "applied", "apply_failed"}
+# The Step states a report may land on (ADR-0004, #55): `submitted` is the real
+# case — a Step whose PR is open, awaiting CI's terminal push — and
+# `done`/`failed`/`rejected` are a retried report against a Step this same
+# endpoint already resolved (record_apply_result makes an identical retry there
+# a no-op, see server.orchestrator). Any other status — the Step has no PR yet
+# (`queued`) — means the report doesn't match reality, so it's rejected rather
+# than blindly overwriting `tf_console`/outputs on a Step nothing is waiting on.
+_REPORTABLE_STEP_STATUSES = {"submitted", "done", "failed", "rejected"}
 
 
 @router.put("/v1/requests/{request_id}/steps/{ordinal}/outputs", response_model=OutputReportResponse)
@@ -272,15 +252,15 @@ def report_step_outputs(
     request_id: str,
     ordinal: int,
     body: OutputReportRequest,
-    # The CI M2M service principal a Step's GitHub Action authenticates as
-    # (#47, #55) — this ingress writes provisioning truth, so it is gated the
-    # same way the admin off-switch is: a trusted, platform-stamped forwarded
+    # The CI M2M service principal a Step's pipeline authenticates as (#47,
+    # #55) — this ingress writes provisioning truth, so it is gated the same
+    # way the admin off-switch is: a trusted, platform-stamped forwarded
     # identity, never a client-controlled header.
     ci_principal: str = Depends(require_ci_principal),
     session: Session = Depends(get_db),
 ) -> OutputReportResponse:
-    """`PUT /v1/requests/{id}/steps/{n}/outputs` (ADR-0003) — the HTTP ingress
-    a Step's GitHub Action calls with its apply result. Resolves the
+    """`PUT /v1/requests/{id}/steps/{n}/outputs` (ADR-0003/ADR-0004) — the HTTP
+    ingress a Step's CI calls with its terminal outcome. Resolves the
     step-scoped path to a Step row and delegates to the persistence seam
     (`orchestrator.record_apply_result`, #54); this route does not
     re-implement the transition/upsert logic itself, only validation, Step
@@ -308,17 +288,17 @@ def report_step_outputs(
             detail=f"Step is not in a state that accepts an apply report: {step.status}",
         )
 
-    # Never log `outputs`/`tf_console` — they're the Action's reported
-    # Terraform values and console text, not ours to assume are secret-free.
+    # Never log `outputs`/`tf_console` — they're CI's reported Terraform values
+    # and console text, not ours to assume are secret-free.
     orchestrator.record_apply_result(
-        session, step, applied=body.applied, outputs=body.outputs, tf_console=body.tf_console
+        session, step, outcome=body.status, outputs=body.outputs, tf_console=body.tf_console
     )
     logger.info(
-        "apply_result_accepted request_id=%s step=%s ordinal=%s applied=%s status=%s",
+        "apply_result_accepted request_id=%s step=%s ordinal=%s outcome=%s status=%s",
         request_id,
         step.key,
         ordinal,
-        body.applied,
+        body.status,
         step.status,
     )
     return OutputReportResponse(ordinal=step.ordinal, key=step.key, status=step.status)

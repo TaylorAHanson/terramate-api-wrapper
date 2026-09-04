@@ -1,5 +1,6 @@
-"""Seam 1: the reconcile loop walks a single-step Playbook to `succeeded` (#19)
-— real HTTP + a real test Lakebase, with only GitHubClient faked.
+"""Seam 1: the reconcile loop opens a single-step Playbook's PR (`submitted`),
+then a CI push (`PUT .../outputs`) walks it to `done`/`succeeded` (#19,
+ADR-0004) — real HTTP + a real test Lakebase, with only GitHubClient faked.
 """
 from __future__ import annotations
 
@@ -17,6 +18,8 @@ from server.models import Output, ProvisioningRequest, Step
 from tests.seam1_api.fakes import FakeGitHubClient
 
 client = TestClient(app)
+
+_CI_HEADERS = {"X-Forwarded-User": "ci-tester"}
 
 
 @pytest.fixture(autouse=True)
@@ -60,78 +63,53 @@ def _get_request(request_id: str) -> dict:
     return response.json()
 
 
-def test_tick_claims_a_queued_step_and_walks_it_to_awaiting_approval(db_session):
+def _report(request_id: str, ordinal: int, **body):
+    return client.put(
+        f"/v1/requests/{request_id}/steps/{ordinal}/outputs",
+        headers=_CI_HEADERS,
+        json={"status": "done", "outputs": {}, "tf_console": "", **body},
+    )
+
+
+def test_tick_claims_a_queued_step_and_opens_its_pr_leaving_it_submitted(db_session):
     request_id = _create_schema_request("bronze")
     fake = FakeGitHubClient()
 
     orchestrator.tick(db_session, fake)
 
     detail = _get_request(request_id)
-    assert detail["status"] == "awaiting_approval"
+    assert detail["status"] == "in_progress"
     step = detail["steps"][0]
-    assert step["status"] == "awaiting_approval"
+    assert step["status"] == "submitted"
     assert step["pr_number"] == 1
     assert step["pr_url"] == "https://github.com/example/repo/pull/1"
     assert len(fake.opened_pull_requests) == 1
 
-    plan_response = client.get(f"/v1/requests/{request_id}/steps/0/plan")
-    assert plan_response.status_code == 200
-    assert plan_response.json()["plan"]
 
-
-def test_tick_after_a_faked_merge_advances_the_step_to_applied_and_succeeds_the_request(db_session):
+def test_a_done_push_advances_the_step_to_done_and_succeeds_the_request(db_session):
     request_id = _create_schema_request("silver")
     fake = FakeGitHubClient()
     orchestrator.tick(db_session, fake)
 
-    pr_number = _get_request(request_id)["steps"][0]["pr_number"]
-    fake.merged_pr_numbers.add(pr_number)
-    orchestrator.tick(db_session, fake)
+    response = _report(request_id, 0, status="done", tf_console="Apply complete!")
+    assert response.status_code == 200
 
     detail = _get_request(request_id)
     assert detail["status"] == "succeeded"
-    assert detail["steps"][0]["status"] == "applied"
+    assert detail["steps"][0]["status"] == "done"
 
 
-def test_tick_after_a_faked_rejection_fails_the_request(db_session):
+def test_a_rejected_push_fails_the_request(db_session):
     request_id = _create_schema_request("gold")
     fake = FakeGitHubClient()
     orchestrator.tick(db_session, fake)
 
-    pr_number = _get_request(request_id)["steps"][0]["pr_number"]
-    fake.closed_unmerged_pr_numbers.add(pr_number)
-    orchestrator.tick(db_session, fake)
+    response = _report(request_id, 0, status="rejected")
+    assert response.status_code == 200
 
     detail = _get_request(request_id)
     assert detail["status"] == "failed"
     assert detail["steps"][0]["status"] == "rejected"
-
-
-def test_a_stalled_plan_does_not_block_a_second_runnable_step_from_being_claimed_and_advanced(db_session):
-    """(#45) `get_plan` never blocks the tick — a Step stuck at `pr_open`
-    because its plan check run hasn't landed must not stop a second, unrelated
-    queued Step from being claimed, opened, and (if its own plan is ready)
-    walked all the way to `awaiting_approval` in that same tick.
-    """
-    stalled_request_id = _create_schema_request("cobalt")
-    fake = FakeGitHubClient()
-    fake.stalled_plan_pr_numbers.add(1)  # the PR about to be opened for the stalled request
-
-    orchestrator.tick(db_session, fake)
-
-    stalled_step = _get_request(stalled_request_id)["steps"][0]
-    assert stalled_step["status"] == "pr_open"
-    assert stalled_step["pr_number"] == 1
-
-    unblocked_request_id = _create_schema_request("nickel")
-    orchestrator.tick(db_session, fake)
-
-    stalled_step = _get_request(stalled_request_id)["steps"][0]
-    assert stalled_step["status"] == "pr_open", "still stalled — unrelated to the second step's progress"
-
-    unblocked_step = _get_request(unblocked_request_id)["steps"][0]
-    assert unblocked_step["status"] == "awaiting_approval"
-    assert unblocked_step["pr_number"] == 2
 
 
 def test_a_stalled_claim_is_resumed_on_a_later_tick(db_session):
@@ -153,17 +131,5 @@ def test_a_stalled_claim_is_resumed_on_a_later_tick(db_session):
     orchestrator.tick(db_session, fake)
 
     detail = _get_request(request_id)
-    assert detail["steps"][0]["status"] == "awaiting_approval"
+    assert detail["steps"][0]["status"] == "submitted"
     assert detail["steps"][0]["pr_number"] == 1
-
-
-def test_plan_endpoint_returns_409_before_the_step_has_a_plan():
-    request_id = _create_schema_request("copper")
-    response = client.get(f"/v1/requests/{request_id}/steps/0/plan")
-    assert response.status_code == 409
-
-
-def test_plan_endpoint_404s_for_an_unknown_step_ordinal():
-    request_id = _create_schema_request("iron")
-    response = client.get(f"/v1/requests/{request_id}/steps/5/plan")
-    assert response.status_code == 404

@@ -55,7 +55,6 @@ class Step(Base):
     status: Mapped[str]
     pr_number: Mapped[int | None]
     pr_url: Mapped[str | None]
-    plan_ref: Mapped[str | None]
     depends_on: Mapped[list[str]] = mapped_column(JSON)
     # Wiring for #20's ordering-and-value-passing: `produces` is the apply-derived
     # output names this Step will emit; `consumes` is the OutputRef ({step_key,
@@ -69,8 +68,9 @@ class Step(Base):
     # Stuck-surfacing (#43): `status_changed_at` is when this Step entered its
     # current status (updated on every transition — `updated_at` isn't
     # `onupdate`-maintained), and `stuck` is the log-once flag the reconcile
-    # loop raises when a Step is held at `applying` past the threshold and
-    # clears on the next transition.
+    # loop raises when a Step has been held at `submitted` past the threshold
+    # (ADR-0004: CI's terminal push never arrived) and clears on the next
+    # transition.
     status_changed_at: Mapped[datetime] = _server_now()
     stuck: Mapped[bool] = mapped_column(server_default=func.false())
     # The reported apply run's console text (#54, ADR-0003) — set by

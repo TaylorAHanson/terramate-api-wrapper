@@ -91,6 +91,14 @@ def _get_request(request_id: str) -> dict:
     return response.json()
 
 
+def _report(request_id: str, ordinal: int, **body):
+    return client.put(
+        f"/v1/requests/{request_id}/steps/{ordinal}/outputs",
+        headers={"X-Forwarded-User": "ci-tester"},
+        json={"status": "done", "outputs": {}, "tf_console": "", **body},
+    )
+
+
 def test_passing_preflight_and_postflight_advance_the_step_normally(db_session, monkeypatch):
     calls: list[str] = []
     monkeypatch.setitem(
@@ -108,17 +116,17 @@ def test_passing_preflight_and_postflight_advance_the_step_normally(db_session, 
 
     assert calls == ["preflight"]
     detail = _get_request(request_id)
-    assert detail["steps"][0]["status"] == "awaiting_approval"
+    assert detail["steps"][0]["status"] == "submitted"
     assert len(fake.opened_pull_requests) == 1
 
-    pr_number = detail["steps"][0]["pr_number"]
-    fake.merged_pr_numbers.add(pr_number)
-    orchestrator.tick(db_session, fake)
+    # CI's `done` push runs postflight (right after the outputs are persisted)
+    # and lands the Step at `done`.
+    assert _report(request_id, 0, status="done").status_code == 200
 
     assert calls == ["preflight", "postflight"]
     detail = _get_request(request_id)
     assert detail["status"] == "succeeded"
-    assert detail["steps"][0]["status"] == "applied"
+    assert detail["steps"][0]["status"] == "done"
 
 
 def test_a_raising_preflight_blocks_pr_open_and_fails_the_step(db_session, monkeypatch):
@@ -133,12 +141,12 @@ def test_a_raising_preflight_blocks_pr_open_and_fails_the_step(db_session, monke
 
     detail = _get_request(request_id)
     assert detail["status"] == "failed"
-    assert detail["steps"][0]["status"] == "plan_failed"
+    assert detail["steps"][0]["status"] == "failed"
     assert detail["steps"][0]["pr_number"] is None
     assert fake.opened_pull_requests == []
 
 
-def test_a_raising_postflight_fails_the_step_after_merge(db_session, monkeypatch):
+def test_a_raising_postflight_fails_the_step_on_the_done_push(db_session, monkeypatch):
     def _boom() -> None:
         raise RuntimeError("post-apply validation failed")
 
@@ -147,13 +155,11 @@ def test_a_raising_postflight_fails_the_step_after_merge(db_session, monkeypatch
     fake = FakeGitHubClient()
     orchestrator.tick(db_session, fake)
 
-    pr_number = _get_request(request_id)["steps"][0]["pr_number"]
-    fake.merged_pr_numbers.add(pr_number)
-    orchestrator.tick(db_session, fake)
+    assert _report(request_id, 0, status="done").status_code == 200
 
     detail = _get_request(request_id)
     assert detail["status"] == "failed"
-    assert detail["steps"][0]["status"] == "apply_failed"
+    assert detail["steps"][0]["status"] == "failed"
     # The PR was already open before postflight ran — a raising postflight
     # halts the Step, but never retroactively un-opens its PR.
     assert len(fake.opened_pull_requests) == 1

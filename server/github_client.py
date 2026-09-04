@@ -1,29 +1,22 @@
-"""The GitHub client seam (architecture.md §4.2, §8).
+"""The GitHub client seam (architecture.md §4.2, §8; ADR-0004).
 
 The orchestrator's single substitution point in tests: everything it needs
-from GitHub — branch + commit bundle edits, open a PR, and read back
-PR/checks/merge/apply status — goes through this interface. Per ADR-0002 the
-real implementation polls for *status only* and never parses run logs or
-reads Terraform state.
+from GitHub goes through this interface. Per **ADR-0004** that is now exactly
+one thing — **open a PR** (branch + commit the bundle edits + open the pull
+request). The API no longer polls GitHub for status of any kind: a Step's
+plan, merge, and apply outcome all arrive as CI *pushes* to the API
+(`PUT .../steps/{n}/outputs`, ADR-0003), so the old status-read methods
+(`get_plan`, `get_pull_request_status`) and their `terraform-plan` check-run
+handling are gone.
 
 `RealGitHubClient` is the live implementation (#22, Seam 3): it commits
 bundle edits via the Git Data API (blob -> tree -> commit -> ref, no local
-checkout) and opens the PR, then reads back merge/close status from the PR
-resource and the `terraform plan` text from a `terraform-plan` check run the
-fixture repo's Actions workflow publishes (see
-`fixtures/terraform-fixture-repo/.github/workflows/terraform.yml`) — never
-Terraform state, never a run log.
+checkout) and opens the PR. It never reads Terraform state, never a run log,
+and — now — never PR status either.
 
-Two resilience properties (#45, a #38 child):
-
-- `get_plan` makes a single, immediate check for the `terraform-plan` check
-  run rather than blocking/sleeping until one lands — `PlanNotReadyError`
-  just means "not yet", and it's the *orchestrator*'s job (`_advance_pr_open`)
-  to re-check on a later tick, so one Step's slow plan never stalls the tick
-  that would otherwise claim and open PRs for other runnable Steps.
-- The transport (`_get`/`_post`) retries a transient GitHub `5xx`/`429` with
-  backoff (honoring `Retry-After` when GitHub sends it) before surfacing it as
-  a failure; a non-transient `4xx` is never retried.
+The transport (`_get`/`_post`) retries a transient GitHub `5xx`/`429` with
+backoff (honoring `Retry-After` when GitHub sends it) before surfacing it as a
+failure; a non-transient `4xx` is never retried (#45).
 """
 from __future__ import annotations
 
@@ -73,12 +66,6 @@ class PullRequestRef:
     url: str
 
 
-@dataclass(frozen=True)
-class PullRequestStatus:
-    merged: bool
-    closed: bool
-
-
 class GitHubClient(Protocol):
     def open_pull_request(
         self,
@@ -90,20 +77,9 @@ class GitHubClient(Protocol):
         edits: Sequence[FileEdit] = (),
     ) -> PullRequestRef: ...
 
-    def get_pull_request_status(self, pr_number: int) -> PullRequestStatus: ...
-
-    def get_plan(self, pr_number: int) -> str: ...
-
 
 class GitHubClientError(RuntimeError):
     """A GitHub API call failed or returned something the client can't use."""
-
-
-class PlanNotReadyError(GitHubClientError):
-    """The fixture repo's plan check run hasn't reported a result yet."""
-
-
-_PLAN_CHECK_RUN_NAME = "terraform-plan"
 
 
 @dataclass
@@ -224,49 +200,6 @@ class RealGitHubClient:
 
     def _get_ref_sha(self, ref: str) -> str:
         return self._get(f"/repos/{self.repo}/git/ref/{ref}")["object"]["sha"]
-
-    # -- status ------------------------------------------------------------
-
-    def get_pull_request_status(self, pr_number: int) -> PullRequestStatus:
-        pr = self._get(f"/repos/{self.repo}/pulls/{pr_number}")
-        merged = bool(pr.get("merged")) or pr.get("merged_at") is not None
-        closed = merged or pr.get("state") == "closed"
-        return PullRequestStatus(merged=merged, closed=closed)
-
-    def get_plan(self, pr_number: int) -> str:
-        """Check once for the fixture repo's plan check run — never blocks.
-
-        `PlanNotReadyError` means "not yet, try again on a later tick": the
-        orchestrator's `_advance_pr_open` is what re-checks across ticks (#45),
-        so a Step whose plan is slow to land never stalls the tick that opened
-        its PR, and never stalls any other Step's tick.
-
-        Never reads Terraform state or a run log (ADR-0002) — only the
-        `terraform-plan` check run's `output.text` the Actions workflow
-        publishes for this PR's head sha.
-        """
-        pr = self._get(f"/repos/{self.repo}/pulls/{pr_number}")
-        head_sha = pr["head"]["sha"]
-        run = self._find_plan_check_run(head_sha)
-        if run is not None and run.get("status") == "completed":
-            logger.info(
-                "github_plan_ready repo=%s pr_number=%s head_sha=%s",
-                self.repo,
-                pr_number,
-                head_sha,
-            )
-            return (run.get("output") or {}).get("text") or ""
-        logger.debug(
-            "github_plan_not_ready repo=%s pr_number=%s head_sha=%s",
-            self.repo,
-            pr_number,
-            head_sha,
-        )
-        raise PlanNotReadyError(f"No completed '{_PLAN_CHECK_RUN_NAME}' check run yet for PR #{pr_number}")
-
-    def _find_plan_check_run(self, head_sha: str) -> dict | None:
-        runs = self._get(f"/repos/{self.repo}/commits/{head_sha}/check-runs")["check_runs"]
-        return next((r for r in runs if r["name"] == _PLAN_CHECK_RUN_NAME), None)
 
     # -- transport -----------------------------------------------------
 

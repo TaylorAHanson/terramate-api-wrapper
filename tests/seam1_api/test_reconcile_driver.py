@@ -1,10 +1,12 @@
-"""Seam 1: the reconcile *driver* walks a request to `succeeded` on its own (#39)
+"""Seam 1: the reconcile *driver* opens a request's PR on its own (#39, ADR-0004)
 — real HTTP + a real test Lakebase, only GitHubClient faked, and crucially
 **no manual `tick()` call**: the background loop is the motor here.
 
-test_reconcile_loop.py already covers what one `tick()` does; this covers that
-the loop actually calls it, repeatedly, until the request is terminal — and
-then stops cleanly.
+Per ADR-0004 opening PRs is the driver's only job — the terminal transition to
+`done`/`succeeded` is a CI push, not something the loop polls for. So this
+proves the loop actually calls `tick()` repeatedly (a Step reaches `submitted`
+with no manual tick), a CI push then completes it, and the loop stops cleanly.
+test_reconcile_loop.py already covers what one `tick()` does.
 """
 from __future__ import annotations
 
@@ -14,8 +16,9 @@ import uuid
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
+from server import orchestrator
 from server.database import get_session
 from server.main import app
 from server.models import Output, ProvisioningRequest, Step
@@ -63,6 +66,19 @@ def _read_request_sync(request_id: str) -> dict:
         session.close()
 
 
+def _report_done_sync(request_id: str, ordinal: int = 0) -> None:
+    """Simulate CI's `done` push, off the event loop — the driver never does
+    this itself (ADR-0004); it only opens PRs."""
+    session = get_session()
+    try:
+        step = session.scalars(
+            select(Step).where(Step.request_id == request_id, Step.ordinal == ordinal)
+        ).one()
+        orchestrator.record_apply_result(session, step, outcome="done", outputs={}, tf_console="")
+    finally:
+        session.close()
+
+
 async def _await(request_id: str, predicate, *, timeout: float = 15.0) -> dict:
     deadline = time.monotonic() + timeout
     snapshot = await asyncio.to_thread(_read_request_sync, request_id)
@@ -75,7 +91,7 @@ async def _await(request_id: str, predicate, *, timeout: float = 15.0) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_driver_walks_a_request_to_succeeded_with_no_manual_tick():
+async def test_driver_opens_the_pr_with_no_manual_tick_and_a_push_succeeds_it():
     request_id = _create_schema_request("bronze")
     fake = FakeGitHubClient()
     stop = asyncio.Event()
@@ -84,18 +100,19 @@ async def test_driver_walks_a_request_to_succeeded_with_no_manual_tick():
     )
     try:
         # The driver opens the Step's PR on its own — no tick() called here.
-        opened = await _await(request_id, lambda s: s["status"] == "awaiting_approval")
+        opened = await _await(request_id, lambda s: s["status"] == "in_progress")
+        assert opened["step_status"] == "submitted"
         assert opened["pr_number"] == 1
 
-        # Simulate the human merge; the driver advances it to applied/succeeded.
-        fake.merged_pr_numbers.add(opened["pr_number"])
+        # CI's push completes it; the request rolls up to succeeded.
+        await asyncio.to_thread(_report_done_sync, request_id)
         final = await _await(request_id, lambda s: s["status"] == "succeeded")
-        assert final["step_status"] == "applied"
+        assert final["step_status"] == "done"
     finally:
         stop.set()
         await asyncio.wait_for(task, timeout=5.0)  # loop stops promptly on the event
 
-    assert len(fake.opened_pull_requests) == 1  # motor didn't re-open the PR after terminal
+    assert len(fake.opened_pull_requests) == 1  # motor didn't re-open the PR after submit
 
 
 @pytest.mark.asyncio
@@ -121,8 +138,8 @@ async def test_a_failing_tick_does_not_kill_the_driver():
     )
     try:
         # First tick raises inside open_pull_request; a later tick succeeds and
-        # the Step still reaches awaiting_approval — the loop survived the fault.
-        opened = await _await(request_id, lambda s: s["status"] == "awaiting_approval")
+        # the Step still reaches submitted — the loop survived the fault.
+        opened = await _await(request_id, lambda s: s["step_status"] == "submitted")
         assert opened["pr_number"] == 1
     finally:
         stop.set()
