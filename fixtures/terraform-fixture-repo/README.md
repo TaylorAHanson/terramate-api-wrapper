@@ -4,7 +4,7 @@ A throwaway GitHub repo standing in for the real Terramate/Terraform repo
 (architecture.md §3.1's Phase 1 fixture), used by
 [terramate-api-wrapper#22](https://github.com/TaylorAHanson/terramate-api-wrapper/issues/22)'s
 Seam 3 suite to prove the real `GitHubClient`'s PR → merge → apply →
-output-write → poll loop end to end, on safe resources (`random_id` /
+CI-push loop end to end (ADR-0004), on safe resources (`random_id` /
 `local_file` only — no cloud credentials, nothing billable).
 
 This directory (`fixtures/terraform-fixture-repo/` in `terramate-api-wrapper`)
@@ -19,31 +19,41 @@ Seam 3 actually talk to over the GitHub API.
   — seeded catalyst-bundle files the `schema`/`workspace` Recipes' `EditFile`s
   target (`server.recipes.schema.locate_catalog`,
   `server.recipes.workspace.locate_metastore_binding`).
-- `.github/workflows/terraform.yml` — `plan` (on PR open/update, publishes a
-  `terraform-plan` check run `RealGitHubClient.get_plan` reads) and `apply`
-  (on PR merge, then writes Terraform's outputs to Lakebase — ADR-0002).
-- `scripts/write_output.py` — the Action → Lakebase write. Parses the merged
-  PR's branch name (`provision/<request_id>/<step_key>`, minted by
-  `server.orchestrator._claim_and_open_next`) to know which `step` row to
-  write the `output` row against.
+- `.github/workflows/terraform.yml` — `plan` (on PR open/update, publishes the
+  plan as a check run **for the human reviewer only** — ADR-0004 dropped API
+  plan-polling, so this is no longer a contract), `apply` (on PR merge, runs
+  `terraform apply` then **PUTs `done`/`failed` to the deployed provisioning
+  API over HTTP**), and `rejected` (on PR close-without-merge, PUTs `rejected`).
+- `scripts/report_outputs.py` — the CI → API terminal-outcome report
+  (**ADR-0003/ADR-0004**, current). Parses the PR's branch name
+  (`provision/<request_id>/<step_key>`, minted by
+  `server.orchestrator._claim_and_open_next`), resolves `step_key → ordinal` via
+  the API, and `PUT`s `{status, outputs, tf_console}` to
+  `/v1/requests/{id}/steps/{ordinal}/outputs` — `status` is `done`/`failed`/
+  `rejected`, driven by the job via `REPORT_STATUS`. Stdlib-only. See the full
+  spec in [`docs/ci-integration-contract.md`](../../docs/ci-integration-contract.md).
+- `scripts/write_output.py` — the **superseded ADR-0002** direct-Lakebase write,
+  kept for reference only (no longer wired into the workflow).
 
-## Required repo secrets (for `apply`'s Lakebase write)
+## Required repo secrets (for the `apply` / `rejected` reports)
 
-Either:
+Both report jobs call the API via HTTP as a Databricks service principal (M2M —
+no interactive browser in Actions):
 
-- `SEAM3_DATABASE_URL` — a full Postgres connection string (simplest; points
-  at a plain test Postgres reachable from GitHub-hosted runners), **or**
-- `SEAM3_DATABRICKS_HOST` / `SEAM3_DATABRICKS_CLIENT_ID` /
-  `SEAM3_DATABRICKS_CLIENT_SECRET` (a service-principal M2M credential —
-  there's no interactive browser in Actions) / `SEAM3_LAKEBASE_INSTANCE_NAME`
-  / `SEAM3_PGHOST` / `SEAM3_PGPORT` / `SEAM3_PGDATABASE` / `SEAM3_PGUSER` —
-  the real deployed-Lakebase path, mirroring `server.database`.
+- `APP_URL` — the deployed provisioning App's base URL
+  (e.g. `https://terramate-api-wrapper-dev-….databricksapps.com`).
+- `CI_DATABRICKS_HOST` — the workspace host the SP mints a token against.
+- `CI_DATABRICKS_CLIENT_ID` / `CI_DATABRICKS_CLIENT_SECRET` — the CI service
+  principal's OAuth client credentials. The SP must have **can use** on the App,
+  and its forwarded identity must be on the App's `CI_PRINCIPALS` allowlist.
 
-Set with `gh secret set SEAM3_DATABASE_URL --repo <owner>/terramate-fixture-repo`.
-Without these, `plan` still works (proves the PR/check-run half of the loop);
-`apply` runs `terraform apply` but its Lakebase write step fails, which is
-exactly the "Action fails to write outputs" failure mode architecture.md §14
-already designs for (the dependent Step just never gets claimed).
+Set with `gh secret set APP_URL --repo <owner>/terramate-fixture-repo` (etc.).
+Without these, `plan` still works (the human-facing check run); the `apply`/
+`rejected` report step fails — the Step then sits at `submitted` and the API
+flags it `stuck` after a timeout, exactly the "no terminal push received"
+failure mode ADR-0004 designs for. See
+[`docs/ci-integration-contract.md`](../../docs/ci-integration-contract.md) for
+the full contract.
 
 ## Re-syncing after an edit here
 

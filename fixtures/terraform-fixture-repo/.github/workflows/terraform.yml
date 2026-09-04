@@ -1,11 +1,15 @@
 name: Terraform plan/apply (Seam 3 fixture)
 
 # The provisioning API (terramate-api-wrapper) never runs Terraform itself
-# (architecture.md §2) — this repo's own Actions do, exactly as they would
-# for a real Terramate repo. `plan` proves the API can read back a real
-# `terraform plan` via a check run (RealGitHubClient.get_plan); `apply`
-# proves a merged Step's outputs land in Lakebase (ADR-0002), which is what
-# unblocks a dependent Step's PR (server.orchestrator._advance_applying).
+# (architecture.md §2) — this repo's own Actions do, exactly as they would for
+# a real Terramate repo. Per ADR-0004 the API opens the PR and then waits for
+# THIS CI to push the terminal outcome; it no longer polls GitHub for plan or
+# merge status. So:
+#   - `plan` publishes the plan for the HUMAN reviewer only (not a contract; the
+#     API never reads it).
+#   - `apply` (on merge) runs `terraform apply` and PUTs `done` (with outputs)
+#     or `failed` to the API.
+#   - `rejected` (on close-without-merge) PUTs `rejected` to the API.
 
 on:
   pull_request:
@@ -18,6 +22,8 @@ permissions:
 
 jobs:
   plan:
+    # Convenience for the human reviewer who approves the PR — the API does not
+    # read this check run any more (ADR-0004 dropped plan polling).
     if: github.event.action != 'closed'
     runs-on: ubuntu-latest
     steps:
@@ -26,7 +32,7 @@ jobs:
       - run: terraform init -input=false
       - run: terraform plan -input=false -no-color -out=plan.tfplan
       - run: terraform show -no-color plan.tfplan > plan.txt
-      - name: Publish plan as a check run
+      - name: Publish plan as a check run (for human reviewers)
         uses: actions/github-script@v7
         with:
           script: |
@@ -57,19 +63,53 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -r scripts/requirements.txt
+      # report_outputs.py is stdlib-only (urllib/json) — no pip install needed.
       - run: terraform init -input=false
-      - run: terraform apply -input=false -auto-approve -no-color
-      - name: Write outputs to Lakebase (ADR-0002)
+      # tee the apply console so it can be reported as the Step's tf_console;
+      # pipefail so a failed apply is detected despite the pipe to tee.
+      - id: apply
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          terraform apply -input=false -auto-approve -no-color | tee apply.txt
+      - name: Report the outcome to the provisioning API (ADR-0004)
         env:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          DATABASE_URL: ${{ secrets.SEAM3_DATABASE_URL }}
-          DATABRICKS_HOST: ${{ secrets.SEAM3_DATABRICKS_HOST }}
-          DATABRICKS_CLIENT_ID: ${{ secrets.SEAM3_DATABRICKS_CLIENT_ID }}
-          DATABRICKS_CLIENT_SECRET: ${{ secrets.SEAM3_DATABRICKS_CLIENT_SECRET }}
-          LAKEBASE_INSTANCE_NAME: ${{ secrets.SEAM3_LAKEBASE_INSTANCE_NAME }}
-          PGHOST: ${{ secrets.SEAM3_PGHOST }}
-          PGPORT: ${{ secrets.SEAM3_PGPORT }}
-          PGDATABASE: ${{ secrets.SEAM3_PGDATABASE }}
-          PGUSER: ${{ secrets.SEAM3_PGUSER }}
-        run: python scripts/write_output.py
+          # `done` if apply succeeded, `failed` if it errored.
+          REPORT_STATUS: ${{ steps.apply.outcome == 'success' && 'done' || 'failed' }}
+          # The deployed app's base URL and the CI service principal's M2M
+          # client-credentials (see fixtures/.../scripts/report_outputs.py and
+          # the fixture README). The SP's forwarded identity must be on the
+          # app's CI_PRINCIPALS allowlist.
+          APP_URL: ${{ secrets.APP_URL }}
+          DATABRICKS_HOST: ${{ secrets.CI_DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.CI_DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.CI_DATABRICKS_CLIENT_SECRET }}
+        run: |
+          export TF_CONSOLE="$(cat apply.txt 2>/dev/null || true)"
+          python scripts/report_outputs.py
+      - name: Fail the job if apply failed
+        if: steps.apply.outcome == 'failure'
+        run: exit 1
+
+  rejected:
+    # A PR closed WITHOUT merging means a human declined the Step (ADR-0004) —
+    # push `rejected` so the API fails the request instead of leaving the Step
+    # at `submitted` forever. No Terraform runs; the branch head ref still
+    # carries the Step key.
+    if: github.event.action == 'closed' && github.event.pull_request.merged == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Report the rejection to the provisioning API (ADR-0004)
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          REPORT_STATUS: rejected
+          APP_URL: ${{ secrets.APP_URL }}
+          DATABRICKS_HOST: ${{ secrets.CI_DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.CI_DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.CI_DATABRICKS_CLIENT_SECRET }}
+        run: python scripts/report_outputs.py
