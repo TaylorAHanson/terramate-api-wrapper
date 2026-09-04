@@ -81,7 +81,7 @@ Concretely:
   plan-surfacing (#19) and plan/merge-decoupling (#45) work — those solved problems this ADR
   removes. The "API never runs Terraform / never parses state or logs" boundary is unchanged and,
   if anything, sharper: the API now learns *only* what CI explicitly reports.
-- **The CI integration contract** (`docs/ci-integration-contract.md`) and the fixture repo
+- **The CI integration contract** (`docs/contracts/ci-integration.md`) and the fixture repo
   (`fixtures/terraform-fixture-repo/`) are rewritten to match: no `terraform-plan` check run
   requirement for state, CI pushes `done`/`failed`/`rejected`.
 

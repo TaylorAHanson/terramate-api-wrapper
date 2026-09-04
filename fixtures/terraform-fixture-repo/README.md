@@ -31,7 +31,7 @@ Seam 3 actually talk to over the GitHub API.
   the API, and `PUT`s `{status, outputs, tf_console}` to
   `/v1/requests/{id}/steps/{ordinal}/outputs` — `status` is `done`/`failed`/
   `rejected`, driven by the job via `REPORT_STATUS`. Stdlib-only. See the full
-  spec in [`docs/ci-integration-contract.md`](../../docs/ci-integration-contract.md).
+  spec in [`docs/contracts/ci-integration.md`](../../docs/contracts/ci-integration.md).
 - `scripts/write_output.py` — the **superseded ADR-0002** direct-Lakebase write,
   kept for reference only (no longer wired into the workflow).
 
@@ -52,7 +52,7 @@ Without these, `plan` still works (the human-facing check run); the `apply`/
 `rejected` report step fails — the Step then sits at `submitted` and the API
 flags it `stuck` after a timeout, exactly the "no terminal push received"
 failure mode ADR-0004 designs for. See
-[`docs/ci-integration-contract.md`](../../docs/ci-integration-contract.md) for
+[`docs/contracts/ci-integration.md`](../../docs/contracts/ci-integration.md) for
 the full contract.
 
 ## Re-syncing after an edit here

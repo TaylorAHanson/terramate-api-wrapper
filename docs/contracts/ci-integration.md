@@ -3,6 +3,8 @@
 **Audience:** whoever owns the Terramate repo and writes its GitHub Actions CI.
 **Purpose:** the exact, minimal contract your CI must satisfy so the provisioning
 API (`terramate-api-wrapper`) can drive it end to end.
+**Sibling contract:** the self-service caller's side is
+[`self-service-integration.md`](self-service-integration.md).
 
 The single most important boundary: **the provisioning API never runs Terraform,
 and never polls GitHub for status.** It opens one pull request per Step and then
@@ -12,7 +14,7 @@ the sole writer of its own database — your CI needs only a scoped API
 credential, never a database credential.
 
 A working, minimal reference implementation lives in
-[`fixtures/terraform-fixture-repo/`](../fixtures/terraform-fixture-repo/) —
+[`fixtures/terraform-fixture-repo/`](../../fixtures/terraform-fixture-repo/) —
 `.github/workflows/terraform.yml` + `scripts/report_outputs.py` (trivial
 `random_id`/`local_file` Terraform, no cloud). Copy its shape.
 
