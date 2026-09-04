@@ -1,14 +1,15 @@
-# CI integration contract — Terramate repo ↔ Provisioning API (ADR-0003)
+# CI integration contract — Terramate repo ↔ Provisioning API (ADR-0003/ADR-0004)
 
 **Audience:** whoever owns the Terramate repo and writes its GitHub Actions CI.
 **Purpose:** the exact, minimal contract your CI must satisfy so the provisioning
 API (`terramate-api-wrapper`) can drive it end to end.
 
-The single most important boundary: **the provisioning API never runs Terraform.**
-It opens pull requests against your repo and reads back status; **your CI** runs
-`terraform plan`/`apply`, and **your CI reports results back to the API over
-HTTP** (ADR-0003). The API is the sole writer of its own database — your CI needs
-only a scoped API credential, never a database credential.
+The single most important boundary: **the provisioning API never runs Terraform,
+and never polls GitHub for status.** It opens one pull request per Step and then
+waits. **Your CI** runs `terraform plan`/`apply`, and **your CI reports every
+terminal outcome back to the API over HTTP** (ADR-0003, ADR-0004). The API is
+the sole writer of its own database — your CI needs only a scoped API
+credential, never a database credential.
 
 A working, minimal reference implementation lives in
 [`fixtures/terraform-fixture-repo/`](../fixtures/terraform-fixture-repo/) —
@@ -26,16 +27,23 @@ sequenceDiagram
     participant CI as Your GitHub Actions
     API->>Repo: open PR on branch provision/<request_id>/<step_key>
     Repo->>CI: pull_request (opened)
-    CI->>CI: terraform plan
-    CI->>Repo: publish check run "terraform-plan" (output.text = plan)
-    API->>Repo: poll check run → advance Step to awaiting_approval
-    Note over Repo: a human reviews & merges the PR
-    Repo->>CI: pull_request (closed, merged)
-    CI->>CI: terraform apply
-    CI->>API: GET /v1/requests/{id}  (resolve step_key → ordinal)
-    CI->>API: PUT /v1/requests/{id}/steps/{ordinal}/outputs
-    API->>API: persist outputs → Step applied → next Step's PR opens
+    CI->>CI: terraform plan (published for the human reviewer only)
+    Note over Repo: a human reviews the plan & merges — or closes the PR
+    alt PR merged
+        Repo->>CI: pull_request (closed, merged=true)
+        CI->>CI: terraform apply
+        CI->>API: GET /v1/requests/{id}  (resolve step_key → ordinal)
+        CI->>API: PUT .../steps/{ordinal}/outputs {status: done|failed, ...}
+        API->>API: persist → Step done → next Step's PR opens
+    else PR closed unmerged
+        Repo->>CI: pull_request (closed, merged=false)
+        CI->>API: PUT .../steps/{ordinal}/outputs {status: rejected}
+        API->>API: Step rejected → request fails
+    end
 ```
+
+The API's only actions are the two `open PR` arrows. Everything after a PR opens
+is a push **from you** (ADR-0004).
 
 ---
 
@@ -54,31 +62,32 @@ This branch name is the **only** context your CI has about which Step it is
 acting on, so parse it from the PR head ref. Bundle file edits are already
 committed on the branch; the PR targets `main`.
 
-## 2. Plan (on PR `opened` / `synchronize` / `reopened`)
+## 2. Plan (optional — for humans, not the API)
 
-Run `terraform plan` and publish a **GitHub check run**:
+Run `terraform plan` and surface it however your reviewers prefer (a check run,
+a PR comment). **The API does not read it** — ADR-0004 removed plan polling, so
+there is no required check-run name or shape. This exists purely so the human
+approving the PR can see what will change.
 
-- **name:** `terraform-plan` (exact — the API matches on this)
-- **head_sha:** the PR head sha
-- **status:** `completed`
-- **output.text:** the human-readable plan (the API surfaces this verbatim via
-  `GET .../steps/{n}/plan`; keep it under ~65 KB)
+## 3. Report the terminal outcome (the core contract)
 
-The API polls this check run and moves the Step from `pr_open` to
-`awaiting_approval` once it is `completed`. No plan check run ⇒ the Step waits.
+Every Step ends in exactly one push to the API:
 
-## 3. Apply + report (on PR `closed` with `merged == true`)
+| Trigger | `status` to report |
+|---|---|
+| PR merged, `terraform apply` **succeeded** | `done` (with `outputs`) |
+| PR merged, `terraform apply` **failed** | `failed` |
+| PR **closed without merging** | `rejected` |
 
-1. Check out the **merge commit** and run `terraform apply`.
-2. Parse `request_id` + `step_key` from the PR head branch.
-3. Resolve `step_key → ordinal`: `GET /v1/requests/{request_id}` and find the
-   entry in `steps[]` whose `key` matches (the report endpoint is
-   ordinal-scoped).
-4. Report the result (next section).
+For a merged PR: check out the **merge commit**, run `terraform apply`, then
+report. For a closed-unmerged PR: report `rejected` immediately (no Terraform
+runs). In both cases, parse `request_id` + `step_key` from the PR head branch
+and resolve `step_key → ordinal` via `GET /v1/requests/{request_id}` (the report
+endpoint is ordinal-scoped).
 
 ---
 
-## The report endpoint (the core contract)
+## The report endpoint
 
 ```
 PUT /v1/requests/{request_id}/steps/{ordinal}/outputs
@@ -90,7 +99,7 @@ Authorization: Bearer <token>   # see Auth below
 
 ```json
 {
-  "applied": true,
+  "status": "done",
   "outputs": { "workspace_id": "1234567890" },
   "tf_console": "Apply complete! Resources: 1 added, 0 changed, 0 destroyed."
 }
@@ -98,9 +107,9 @@ Authorization: Bearer <token>   # see Auth below
 
 | Field | Meaning |
 |---|---|
-| `applied` | `true` if `terraform apply` succeeded, `false` if it failed. |
-| `outputs` | Apply-derived values, **keyed by the output names the Step declares** (see "Output names" below). JSON-serializable values. Send `{}` when the Step produces none. |
-| `tf_console` | Raw apply console text. **Always send it**, success or failure — it is stored for humans regardless. |
+| `status` | **Required.** One of `done`, `failed`, `rejected`. |
+| `outputs` | Apply-derived values, **keyed by the output names the Step declares** (see "Output names" below). JSON-serializable. Only meaningful for `done`; omit or send `{}` otherwise. |
+| `tf_console` | Raw apply console text. Send it for `done`/`failed`; a `rejected` PR never applied, so it has none. Optional — defaults to empty. |
 
 **Responses:**
 
@@ -110,10 +119,12 @@ Authorization: Bearer <token>   # see Auth below
 | `401` | No trusted forwarded identity — your auth token didn't resolve. Fix auth. |
 | `403` | Identity resolved but not on the API's `CI_PRINCIPALS` allowlist. Ask the API operator to add your service principal. |
 | `404` | Unknown `request_id` or `ordinal`. |
-| `409` | The Step isn't in a reportable state (only `applying`, `applied`, `apply_failed` accept a report). Usually means the PR wasn't merged as the API expected, or you're reporting the wrong Step. |
+| `409` | The Step isn't in a reportable state — it has no open PR yet (`queued`). Usually means you're reporting the wrong Step. |
+| `422` | `status` wasn't one of `done`/`failed`/`rejected`. |
 
 **Idempotent:** retrying an identical report is a no-op — safe to retry on
-transient network failure.
+transient network failure. A repeat report against an already-terminal Step is
+accepted (`200`) but does not re-transition it.
 
 ### Output names (the coupling that matters most)
 
@@ -121,14 +132,14 @@ The `outputs` keys **must match the names the Step is expected to produce**, bec
 later Step consumes them by reference (e.g. `${steps.create.outputs.workspace_id}`).
 Each Recipe defines these. For the current `workspace` Recipe:
 
-| Step key | Must emit outputs |
+| Step key | Must emit outputs (on `done`) |
 |---|---|
 | `create` | `workspace_id` |
 | `bind` | *(none)* |
 
-If a Step's expected output names are missing from your report, the API holds
-the Step at `applying` (waiting for the rest) and flags it `stuck` after a
-timeout — the dependent Step's PR never opens. Get the names right.
+If a Step reports `done` without an output that a dependent Step consumes, that
+dependent Step's PR will fail to open when the API tries to resolve the missing
+reference. Get the names right.
 
 ---
 
@@ -162,14 +173,17 @@ you send. Store `client_id`/`client_secret` as CI secrets.
 
 ## Failure semantics
 
-- **Apply failed:** report `{"applied": false, "outputs": {}, "tf_console": "..."}`.
-  The Step moves to `apply_failed` and the whole request fails (halt, no
-  rollback) — already-applied Steps stay applied; nothing further is attempted.
-- **No report / missing outputs:** the Step stays at `applying` and is flagged
-  `stuck` after `STEP_STUCK_THRESHOLD_SECONDS`, surfaced to an operator. The
-  dependent Step's PR does not open.
-- **PR closed unmerged:** the API treats the Step as `rejected` and the request
-  fails. (No report needed from you.)
+- **Apply failed:** report `{"status": "failed", "tf_console": "..."}`. The Step
+  moves to `failed` and the whole request fails (halt, no rollback) —
+  already-done Steps stay done; nothing further is attempted.
+- **PR closed unmerged:** report `{"status": "rejected"}`. The Step moves to
+  `rejected` and the request fails. This push is **required** — without it the
+  API cannot tell a declined PR from one whose CI simply hasn't finished, so the
+  Step would sit at `submitted` until an operator intervenes (the API flags it
+  `stuck` after `STEP_STUCK_THRESHOLD_SECONDS`).
+- **No report at all:** the Step stays at `submitted` and is flagged `stuck`
+  after the threshold, surfaced to an operator. Make sure every terminal path in
+  your CI (including apply failure and close-unmerged) reports.
 
 ---
 
@@ -178,14 +192,12 @@ you send. Store `client_id`/`client_secret` as CI secrets.
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/v1/requests/{id}` | Resolve `step_key → ordinal`; inspect Step statuses. |
-| `PUT` | `/v1/requests/{id}/steps/{ordinal}/outputs` | Report the apply result. |
-
-(`GET /v1/requests/{id}/steps/{ordinal}/plan` also exists — that's the API
-reading back the plan *you* published; you don't call it.)
+| `PUT` | `/v1/requests/{id}/steps/{ordinal}/outputs` | Report the Step's terminal outcome. |
 
 ## What you must NOT rely on
 
-The API never parses Terraform state or run logs and never reads outputs from
-anywhere but your `PUT` (this is ADR-0003, which supersedes the earlier ADR-0002
-design where CI wrote the database directly). If it isn't in the plan check run
-or the `PUT` body, the API never sees it.
+The API never parses Terraform state or run logs, never polls GitHub for PR/plan
+status, and never reads outcomes from anywhere but your `PUT` (ADR-0004, which
+drops the status polling that the earlier design assumed; ADR-0003 already moved
+output capture off the ADR-0002 direct-database write). If it isn't in your
+`PUT` body, the API never sees it.

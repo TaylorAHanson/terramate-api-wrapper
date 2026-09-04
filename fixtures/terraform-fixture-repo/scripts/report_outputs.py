@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
-"""Report this apply's result to the provisioning API over HTTP (ADR-0003).
+"""Report this Step's terminal outcome to the provisioning API over HTTP
+(ADR-0003/ADR-0004).
 
 Supersedes the ADR-0002 direct-Lakebase write (`scripts/write_output.py`): the
 API is the *sole* writer of Lakebase, so CI holds only a scoped API credential
 (a Databricks service principal) — no DB credential, no knowledge of the schema.
-Run by the fixture repo's `apply` job after `terraform apply`, on the merged
-PR's own branch (`provision/<request_id>/<step_key>`, minted by
-`server.orchestrator._claim_and_open_next`).
+
+Per **ADR-0004** the API opens the PR and then never polls GitHub — every Step
+transition after that is *this push*. The outcome (`REPORT_STATUS`) is:
+
+- `done` — the merged PR's `terraform apply` succeeded; this reports the
+  apply-derived outputs (run by the `apply` job).
+- `failed` — the apply ran and failed (also the `apply` job, via
+  `steps.apply.outcome`).
+- `rejected` — the PR was closed without merging (run by the on-close
+  `rejected` job); no outputs, no apply console.
 
 Auth (M2M): mint a Databricks workspace OAuth token via the service principal's
 client-credentials grant, then call the deployed app. The app sits behind the
 Databricks Apps OAuth proxy, which authenticates the token and stamps the SP's
 identity onto `X-Forwarded-User` — exactly what `server.auth.require_ci_principal`
-checks against `CI_PRINCIPALS` (see that module's docstring: X-Forwarded-User is
-"the expected shape for the self-service app's M2M service-principal calls").
+checks against `CI_PRINCIPALS`.
 
 The endpoint is ordinal-scoped (`.../steps/{ordinal}/outputs`) but the branch
 carries the step *key*, so this resolves key -> ordinal via a `GET` on the
@@ -31,6 +38,7 @@ import urllib.error
 import urllib.request
 
 _BRANCH_PATTERN = re.compile(r"^provision/(?P<request_id>[^/]+)/(?P<step_key>[^/]+)$")
+_VALID_STATUSES = {"done", "failed", "rejected"}
 
 
 def _oauth_token(host: str, client_id: str, client_secret: str) -> str:
@@ -75,6 +83,11 @@ def _terraform_outputs() -> dict:
 
 
 def main() -> int:
+    status = os.environ.get("REPORT_STATUS", "done")
+    if status not in _VALID_STATUSES:
+        print(f"REPORT_STATUS must be one of {sorted(_VALID_STATUSES)}, got {status!r}.", file=sys.stderr)
+        return 1
+
     branch = os.environ["HEAD_REF"]
     match = _BRANCH_PATTERN.match(branch)
     if match is None:
@@ -96,15 +109,18 @@ def main() -> int:
         print(f"No step {step_key!r} in request {request_id!r}.", file=sys.stderr)
         return 1
 
+    # Only a successful apply has outputs to report; `failed`/`rejected` carry
+    # none (a rejected PR never applied at all).
+    outputs = _terraform_outputs() if status == "done" else {}
     body = {
-        "applied": True,
-        "outputs": _terraform_outputs(),
+        "status": status,
+        "outputs": outputs,
         "tf_console": os.environ.get("TF_CONSOLE", ""),
     }
     result = _api(
         "PUT", f"{app_url}/v1/requests/{request_id}/steps/{ordinal}/outputs", token, body
     )
-    print(f"Reported apply result for step {step_key!r} (ordinal {ordinal}): {result}")
+    print(f"Reported {status!r} for step {step_key!r} (ordinal {ordinal}): {result}")
     return 0
 
 
