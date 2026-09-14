@@ -5,9 +5,54 @@ the placeholder token (architecture.md §15.1). Pure functions, no DB/network.
 """
 from __future__ import annotations
 
+from pydantic import BaseModel
+
 from server import orchestrator
 from server.models import ProvisioningRequest, Step
-from server.recipes.framework import AddFile, EditFile
+from server.recipes.framework import AddFile, EditFile, OutputRef, Playbook, Recipe, StepSpec
+from server.recipes.registry import RECIPES
+from server.recipes.workspace import bind_workspace_patch, set_owner_patch
+
+
+class _MockTwoStepParams(BaseModel):
+    name: str
+    metastore: str
+    domain_owner: str
+    groups: list[str] = []
+
+
+class _MockTwoStepRecipe(Recipe):
+    type = "_test_two_step"
+    params_model = _MockTwoStepParams
+
+    def build(self, params: _MockTwoStepParams) -> Playbook:
+        return Playbook(
+            steps=[
+                StepSpec(
+                    key="create",
+                    bundle_edits=[
+                        AddFile(f"stacks/workspaces/{params.name}/stack.tm.hcl", f'stack "{params.name}" {{}}'),
+                        AddFile(f"stacks/workspaces/{params.name}/inputs.yaml", f"name: {params.name}"),
+                    ],
+                    produces=["workspace_id"],
+                ),
+                StepSpec(
+                    key="bind",
+                    depends_on=["create"],
+                    consumes=[OutputRef("create", "workspace_id")],
+                    bundle_edits=[
+                        EditFile(
+                            f"stacks/metastores/{params.metastore}/bindings.tm.yaml",
+                            bind_workspace_patch("${steps.create.outputs.workspace_id}", params.groups),
+                        ),
+                        EditFile(f"stacks/workspaces/{params.name}/inputs.yaml", set_owner_patch(params.domain_owner)),
+                    ],
+                ),
+            ]
+        )
+
+
+RECIPES["_test_two_step"] = _MockTwoStepRecipe()
 
 
 def _request(type_: str, params: dict) -> ProvisioningRequest:
@@ -39,7 +84,7 @@ def _step(request: ProvisioningRequest, key: str, **kwargs) -> Step:
 
 def test_resolve_edits_substitutes_workspace_id_into_bind_step_content():
     request = _request(
-        "workspace",
+        "_test_two_step",
         {"name": "analytics", "metastore": "main", "domain_owner": "platform-team", "groups": ["data-eng"]},
     )
     step = _step(
@@ -62,15 +107,16 @@ def test_resolve_edits_substitutes_workspace_id_into_bind_step_content():
 def test_resolve_edits_is_a_no_op_substitution_for_a_step_with_no_consumes():
     request = _request(
         "workspace",
-        {"name": "analytics", "metastore": "main", "domain_owner": "platform-team", "groups": []},
+        {"name": "analytics"},
     )
-    step = _step(request, "create", produces=["workspace_id"])
+    step = _step(request, "foundation")
 
     edits = orchestrator._resolve_edits(step, resolved=[])
 
-    assert len(edits) == 2
-    assert all(isinstance(edit, AddFile) for edit in edits)
-    assert "analytics" in edits[0].content
+    assert len(edits) == 1
+    assert isinstance(edits[0], AddFile)
+    assert edits[0].path == "src/configs/analytics/core_infrastructure/foundation/foundation.tm.yml"
+    assert "analytics:" in edits[0].content
 
 
 def test_resolve_edits_for_schema_recipe_single_step():

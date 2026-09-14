@@ -36,14 +36,14 @@ from server.models import ProvisioningRequest, Step
 from server.orchestrator import TERMINAL_REQUEST_STATUSES
 from server.recipes.registry import RECIPES
 from server.recipes.schema import SchemaProvisioningRequest
-from server.recipes.workspace import WorkspaceProvisioningRequest
+from server.recipes.workspace import FoundationProvisioningRequest, WorkspaceProvisioningRequest
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 ProvisioningRequestBody = Annotated[
-    Union[SchemaProvisioningRequest, WorkspaceProvisioningRequest],
+    Union[SchemaProvisioningRequest, WorkspaceProvisioningRequest, FoundationProvisioningRequest],
     Field(discriminator="type"),
 ]
 

@@ -3,44 +3,14 @@
     {
       "bundle_edits": [
         {
-          "content": "stack \"analytics\" {\n  source = \"modules/workspace\"\n}\n",
-          "path": "stacks/workspaces/analytics/stack.tm.hcl",
-          "type": "add_file"
-        },
-        {
-          "content": "name: analytics\nmetastore: main\n",
-          "path": "stacks/workspaces/analytics/inputs.yaml",
+          "content": "apiVersion: terramate.io/cli/v1\nkind: BundleInstance\nmetadata:\n  name: foundation\n  uuid: ef845e8f-8f75-474b-9133-95d1aa65e6b9\nspec:\n  source: \"/src/bundles/core_infrastructure/foundation\"\n  environments:\n    sbx-test:\n      inputs:\n        business_domains:\n          - \"controltower\"\n",
+          "path": "src/configs/sbx-test/core_infrastructure/foundation/foundation.tm.yml",
           "type": "add_file"
         }
       ],
       "consumes": [],
       "depends_on": [],
-      "key": "create",
-      "produces": [
-        "workspace_id"
-      ]
-    },
-    {
-      "bundle_edits": [
-        {
-          "path": "stacks/metastores/main/bindings.tm.yaml",
-          "type": "edit_file"
-        },
-        {
-          "path": "stacks/workspaces/analytics/inputs.yaml",
-          "type": "edit_file"
-        }
-      ],
-      "consumes": [
-        {
-          "output_name": "workspace_id",
-          "step_key": "create"
-        }
-      ],
-      "depends_on": [
-        "create"
-      ],
-      "key": "bind",
+      "key": "foundation",
       "produces": []
     }
   ]
