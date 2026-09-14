@@ -26,3 +26,5 @@ frontend.log
 
 # Isaac local tool state — never commit
 .isaac/
+
+.databricks/
