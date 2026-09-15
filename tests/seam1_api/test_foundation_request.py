@@ -68,13 +68,11 @@ def test_foundation_request_opens_pr_with_correct_yaml_and_path(db_session):
     assert pr.branch_name == f"provision/{request_id}/foundation"
     assert len(pr.edits) == 1
     edit = pr.edits[0]
-    assert edit.path == "src/configs/sbx-test/core_infrastructure/foundation/foundation.tm.yml"
-    assert "apiVersion: terramate.io/cli/v1" in edit.content
-    assert "kind: BundleInstance" in edit.content
-    assert "name: foundation" in edit.content
-    assert 'source: "/src/bundles/core_infrastructure/foundation"' in edit.content
-    assert "sbx-test:" in edit.content
-    assert '"controltower"' in edit.content
+    assert edit.path == "src/configs/sbx/core_infrastructure/foundation/foundation.tm.yml"
+    patched = edit.patch(
+        {"spec": {"environments": {"sbx": {"inputs": {"business_domains": ["controltower"]}}}}}
+    )
+    assert patched["spec"]["environments"]["sbx"]["inputs"]["business_domains"] == ["controltower"]
 
     # Advance to terminal: no outputs required
     report = client.put(
@@ -109,7 +107,11 @@ def test_foundation_request_with_custom_business_domain(db_session):
 
     assert len(fake.opened_pull_requests) == 1
     edit = fake.opened_pull_requests[0].edits[0]
-    assert edit.path == "src/configs/prod-analytics/core_infrastructure/foundation/foundation.tm.yml"
-    assert "prod-analytics:" in edit.content
-    assert '"wealth-management"' in edit.content
-    assert '"controltower"' not in edit.content
+    assert edit.path == "src/configs/sbx/core_infrastructure/foundation/foundation.tm.yml"
+    patched = edit.patch(
+        {"spec": {"environments": {"sbx": {"inputs": {"business_domains": ["controltower"]}}}}}
+    )
+    assert patched["spec"]["environments"]["sbx"]["inputs"]["business_domains"] == [
+        "controltower",
+        "wealth-management",
+    ]

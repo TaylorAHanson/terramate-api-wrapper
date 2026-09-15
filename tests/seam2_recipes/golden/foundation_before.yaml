@@ -1,0 +1,12 @@
+apiVersion: terramate.io/cli/v1
+kind: BundleInstance
+metadata:
+  name: foundation
+  uuid: ef845e8f-8f75-474b-9133-95d1aa65e6b9
+spec:
+  source: "/src/bundles/core_infrastructure/foundation"
+  environments:
+    sbx:
+      inputs:
+        business_domains:
+          - "controltower"

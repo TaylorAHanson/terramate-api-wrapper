@@ -114,9 +114,15 @@ def test_resolve_edits_is_a_no_op_substitution_for_a_step_with_no_consumes():
     edits = orchestrator._resolve_edits(step, resolved=[])
 
     assert len(edits) == 1
-    assert isinstance(edits[0], AddFile)
-    assert edits[0].path == "src/configs/analytics/core_infrastructure/foundation/foundation.tm.yml"
-    assert "analytics:" in edits[0].content
+    assert isinstance(edits[0], EditFile)
+    assert edits[0].path == "src/configs/sbx/core_infrastructure/foundation/foundation.tm.yml"
+    patched = edits[0].patch(
+        {"spec": {"environments": {"sbx": {"inputs": {"business_domains": ["controltower"]}}}}}
+    )
+    assert patched["spec"]["environments"]["sbx"]["inputs"]["business_domains"] == [
+        "controltower",
+        "analytics",
+    ]
 
 
 def test_resolve_edits_for_schema_recipe_single_step():

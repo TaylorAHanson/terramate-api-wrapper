@@ -9,10 +9,12 @@ from pathlib import Path
 
 import yaml
 
+from server.recipes.framework import EditFile
 from server.recipes.workspace import (
     FoundationRecipe,
     WorkspaceParams,
     WorkspaceRecipe,
+    add_business_domain_patch,
     bind_workspace_patch,
     set_owner_patch,
 )
@@ -41,8 +43,8 @@ def test_foundation_recipe_matches_workspace_playbook():
     assert_matches_golden(playbook, GOLDEN_DIR / "workspace_case.json")
 
 
-def test_workspace_recipe_generates_uuid_and_replaces_environment_key():
-    params = WorkspaceParams(name="sbx-test")
+def test_workspace_recipe_uses_sbx_environment_and_edits_foundation():
+    params = WorkspaceParams(name="sbx-test", business_domain="finance")
     playbook = WorkspaceRecipe().build(params)
     assert len(playbook.steps) == 1
     step = playbook.steps[0]
@@ -52,27 +54,51 @@ def test_workspace_recipe_generates_uuid_and_replaces_environment_key():
     assert step.depends_on == ()
     assert len(step.bundle_edits) == 1
     edit = step.bundle_edits[0]
-    assert edit.path == "src/configs/sbx-test/core_infrastructure/foundation/foundation.tm.yml"
-    assert "sbx-test:" in edit.content
-    assert '"controltower"' in edit.content
-    assert f"uuid: {params.uuid}" in edit.content
+    assert isinstance(edit, EditFile)
+    assert edit.path == "src/configs/sbx/core_infrastructure/foundation/foundation.tm.yml"
+
+    # Test patch execution
+    before = yaml.safe_load((GOLDEN_DIR / "foundation_before.yaml").read_text())
+    after = edit.patch(before)
+    assert after["spec"]["environments"]["sbx"]["inputs"]["business_domains"] == [
+        "controltower",
+        "finance",
+    ]
 
 
-def test_workspace_recipe_custom_business_domain():
-    params = WorkspaceParams(name="sbx-test", business_domain="risk-analytics")
-    playbook = WorkspaceRecipe().build(params)
-    edit = playbook.steps[0].bundle_edits[0]
-    assert '"risk-analytics"' in edit.content
-    assert '"controltower"' not in edit.content
+def test_add_business_domain_patch_produces_the_expected_file_diff():
+    before = yaml.safe_load((GOLDEN_DIR / "foundation_before.yaml").read_text())
+
+    patch = add_business_domain_patch(domains=["finance"], environment="sbx")
+    after = patch(before)
+
+    expected = yaml.safe_load((GOLDEN_DIR / "foundation_after.yaml").read_text())
+    assert after == expected
 
 
-def test_workspace_recipe_multiple_business_domains():
-    params = WorkspaceParams(name="sbx-test", business_domains=["domain-a", "domain-b"])
-    playbook = WorkspaceRecipe().build(params)
-    edit = playbook.steps[0].bundle_edits[0]
-    assert '"domain-a"' in edit.content
-    assert '"domain-b"' in edit.content
-    assert '"controltower"' not in edit.content
+def test_add_business_domain_patch_is_idempotent():
+    before = yaml.safe_load((GOLDEN_DIR / "foundation_before.yaml").read_text())
+
+    patch = add_business_domain_patch(domains=["controltower"], environment="sbx")
+    after = patch(before)
+
+    # controltower was already in before, so it must not be duplicated
+    assert after["spec"]["environments"]["sbx"]["inputs"]["business_domains"] == ["controltower"]
+
+
+def test_add_business_domain_patch_initializes_empty_document():
+    patch = add_business_domain_patch(
+        domains=["finance"], environment="sbx", default_uuid="custom-uuid"
+    )
+    result = patch({})
+
+    assert result["apiVersion"] == "terramate.io/cli/v1"
+    assert result["metadata"]["uuid"] == "custom-uuid"
+    assert "sbx" in result["spec"]["environments"]
+    assert result["spec"]["environments"]["sbx"]["inputs"]["business_domains"] == [
+        "controltower",
+        "finance",
+    ]
 
 
 def test_bind_workspace_patch_produces_the_expected_file_diff():

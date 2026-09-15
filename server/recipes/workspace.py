@@ -1,8 +1,9 @@
 """The `workspace` Recipe: customer Foundation stack step ("first step spec for the
 workspace").
 
-Opens a pull request adding the foundation Terramate bundle instance file:
-`src/configs/{name}/core_infrastructure/foundation/foundation.tm.yml`.
+Opens a pull request editing the foundation Terramate bundle instance file:
+`src/configs/{environment}/core_infrastructure/foundation/foundation.tm.yml`
+to append the requested business domain(s) under `environments.{environment}.inputs.business_domains`.
 """
 from __future__ import annotations
 
@@ -19,7 +20,8 @@ _WORKSPACE_ID_PLACEHOLDER = "${steps.create.outputs.workspace_id}"
 class WorkspaceParams(BaseModel):
     model_config = {"extra": "ignore"}
 
-    name: str
+    name: str = ""
+    environment: str = "sbx"
     business_domain: str = "controltower"
     business_domains: list[str] = Field(default_factory=lambda: ["controltower"])
     uuid: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -30,14 +32,29 @@ class WorkspaceParams(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _normalize_domains(cls, data: Any) -> Any:
+    def _normalize_fields(cls, data: Any) -> Any:
         if isinstance(data, dict):
-            if "business_domains" in data and data["business_domains"]:
-                if "business_domain" not in data or not data["business_domain"]:
-                    data["business_domain"] = data["business_domains"][0]
-            elif "business_domain" in data and data["business_domain"]:
-                if "business_domains" not in data or not data["business_domains"]:
-                    data["business_domains"] = [data["business_domain"]]
+            bds = data.get("business_domains")
+            bd = data.get("business_domain")
+            name = data.get("name")
+
+            if bds:
+                if not bd:
+                    data["business_domain"] = bds[0]
+            elif bd:
+                data["business_domains"] = [bd]
+            elif name and name not in ("sbx", "sbx-test", "workspace"):
+                data["business_domain"] = name
+                data["business_domains"] = [name]
+            else:
+                data["business_domain"] = "controltower"
+                data["business_domains"] = ["controltower"]
+
+            if not data.get("name"):
+                data["name"] = data.get("business_domain", "workspace")
+
+            if not data.get("environment"):
+                data["environment"] = "sbx"
         return data
 
 
@@ -57,9 +74,9 @@ class FoundationProvisioningRequest(BaseModel):
     params: WorkspaceParams
 
 
-def foundation_config_path(name: str) -> str:
+def foundation_config_path(environment: str = "sbx") -> str:
     """The bundle config file for the workspace foundation stack."""
-    return f"src/configs/{name}/core_infrastructure/foundation/foundation.tm.yml"
+    return f"src/configs/{environment}/core_infrastructure/foundation/foundation.tm.yml"
 
 
 def render_foundation_config(params: WorkspaceParams) -> str:
@@ -74,11 +91,57 @@ def render_foundation_config(params: WorkspaceParams) -> str:
         "spec:\n"
         '  source: "/src/bundles/core_infrastructure/foundation"\n'
         "  environments:\n"
-        f"    {params.name}:\n"
+        f"    {params.environment}:\n"
         "      inputs:\n"
         "        business_domains:\n"
         f"{domains_yaml}\n"
     )
+
+
+def add_business_domain_patch(
+    domains: list[str],
+    environment: str = "sbx",
+    default_uuid: str | None = None,
+) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    """A structured YAML patch that appends business domain(s) under
+    environments.{environment}.inputs.business_domains without modifying existing domains.
+    """
+
+    def patch(document: dict[str, Any]) -> dict[str, Any]:
+        doc = dict(document)
+        if not doc:
+            doc = {
+                "apiVersion": "terramate.io/cli/v1",
+                "kind": "BundleInstance",
+                "metadata": {
+                    "name": "foundation",
+                    "uuid": default_uuid or str(uuid.uuid4()),
+                },
+                "spec": {
+                    "source": "/src/bundles/core_infrastructure/foundation",
+                    "environments": {
+                        environment: {
+                            "inputs": {
+                                "business_domains": ["controltower"],
+                            }
+                        }
+                    },
+                },
+            }
+
+        spec = doc.setdefault("spec", {})
+        envs = spec.setdefault("environments", {})
+        env_config = envs.setdefault(environment, {})
+        inputs = env_config.setdefault("inputs", {})
+        existing_domains = inputs.setdefault("business_domains", [])
+
+        for domain in domains:
+            if domain not in existing_domains:
+                existing_domains.append(domain)
+
+        return doc
+
+    return patch
 
 
 class WorkspaceRecipe(Recipe):
@@ -91,9 +154,13 @@ class WorkspaceRecipe(Recipe):
                 StepSpec(
                     key="foundation",
                     bundle_edits=[
-                        AddFile(
-                            foundation_config_path(params.name),
-                            render_foundation_config(params),
+                        EditFile(
+                            foundation_config_path(params.environment),
+                            add_business_domain_patch(
+                                domains=params.business_domains,
+                                environment=params.environment,
+                                default_uuid=params.uuid,
+                            ),
                         ),
                     ],
                 ),

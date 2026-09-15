@@ -88,6 +88,9 @@ already-accepted request succeeds even if intake later closed).
 The body is a **discriminated union on `type`** (also published live at
 `/openapi.json`). Two types exist today:
 
+- `schema` — add a schema to an existing catalog.
+- `workspace` (aliased as `foundation`) — provision a workspace domain in the Foundation stack.
+
 ### `type: "schema"` — add a schema to an existing catalog
 
 ```json
@@ -111,30 +114,33 @@ The body is a **discriminated union on `type`** (also published live at
 
 One Step (`add-schema`), no apply-derived outputs.
 
-### `type: "workspace"` — create a workspace and bind it to a metastore
+### `type: "workspace"` (or `type: "foundation"`) — provision a domain in the Foundation stack
+
+Registers a new business domain (e.g. `finance`) under the Terramate bundle configuration for the target environment (`sbx`). Opens a pull request editing `src/configs/{environment}/core_infrastructure/foundation/foundation.tm.yml` to append the business domain under `inputs.business_domains`.
 
 ```json
 {
   "type": "workspace",
   "params": {
-    "name": "team-analytics",
-    "metastore": "us-east-1-metastore",
-    "domain_owner": "platform@acme.com",
-    "groups": ["analysts", "engineers"]
+    "business_domain": "finance",
+    "name": "finance",
+    "environment": "sbx"
   }
 }
 ```
 
-| Param | Required | Meaning |
-|---|---|---|
-| `name` | yes | New workspace name. |
-| `metastore` | yes | Metastore to bind the new workspace to. |
-| `domain_owner` | yes | Owner set on the workspace during `bind`. |
-| `groups` | no | Groups to grant on the binding; defaults to `[]`. |
+| Param | Required | Default | Meaning |
+|---|---|---|---|
+| `business_domain` | no | `"controltower"` | Business domain to add to `inputs.business_domains`. |
+| `name` | no | `business_domain` | Identifier/name for the workspace request. |
+| `environment` | no | `"sbx"` | Target environment key in the bundle configuration. |
+| `business_domains` | no | `["controltower"]` | List of business domains (automatically kept in sync with `business_domain`). |
+| `uuid` | no | *(auto UUIDv4)* | Unique ID in the bundle metadata. |
+| `metastore` | no | `null` | Optional / legacy parameter (ignored during foundation step). |
+| `domain_owner` | no | `null` | Optional / legacy parameter (ignored during foundation step). |
+| `groups` | no | `[]` | Optional / legacy parameter (ignored during foundation step). |
 
-Two ordered Steps: `create` (produces `workspace_id`), then `bind` (consumes it).
-`bind`'s PR does not open until `create` is `done` — the workspace id doesn't
-exist until `create` has actually applied.
+One Step (`foundation`), no apply-derived outputs. The resulting PR appends the domain to `src/configs/sbx/core_infrastructure/foundation/foundation.tm.yml` without altering existing domains or keys.
 
 ### Responses
 
@@ -157,20 +163,15 @@ Returns the full request with its Steps:
 
 ```json
 {
-  "id": "…", "type": "workspace", "params": { … },
+  "id": "…", "type": "workspace", "params": { "business_domain": "finance", "name": "finance" },
   "version": "v1", "requester": "…",
   "status": "in_progress",
   "created_at": "…", "updated_at": "…",
   "steps": [
     {
-      "ordinal": 0, "key": "create", "status": "done",
-      "pr_number": 41, "pr_url": "https://github.com/…/pull/41",
-      "depends_on": [], "stuck": false, "status_changed_at": "…"
-    },
-    {
-      "ordinal": 1, "key": "bind", "status": "submitted",
+      "ordinal": 0, "key": "foundation", "status": "submitted",
       "pr_number": 42, "pr_url": "https://github.com/…/pull/42",
-      "depends_on": ["…"], "stuck": false, "status_changed_at": "…"
+      "depends_on": [], "stuck": false, "status_changed_at": "…"
     }
   ]
 }

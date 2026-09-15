@@ -58,7 +58,7 @@ provision/<request_id>/<step_key>
 ```
 
 - `<request_id>` — a UUID.
-- `<step_key>` — e.g. `create`, `bind`.
+- `<step_key>` — e.g. `foundation`, `add-schema`.
 
 This branch name is the **only** context your CI has about which Step it is
 acting on, so parse it from the PR head ref. Bundle file edits are already
@@ -132,12 +132,12 @@ accepted (`200`) but does not re-transition it.
 
 The `outputs` keys **must match the names the Step is expected to produce**, because a
 later Step consumes them by reference (e.g. `${steps.create.outputs.workspace_id}`).
-Each Recipe defines these. For the current `workspace` Recipe:
+Each Recipe defines these. For the current Recipes:
 
 | Step key | Must emit outputs (on `done`) |
 |---|---|
-| `create` | `workspace_id` |
-| `bind` | *(none)* |
+| `foundation` (`workspace`) | *(none — `outputs` dict may be empty `{}`)* |
+| `add-schema` (`schema`) | *(none — `outputs` dict may be empty `{}`)* |
 
 If a Step reports `done` without an output that a dependent Step consumes, that
 dependent Step's PR will fail to open when the API tries to resolve the missing
