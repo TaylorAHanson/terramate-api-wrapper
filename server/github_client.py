@@ -32,6 +32,7 @@ import httpx
 import yaml
 
 from server.recipes.framework import AddFile, EditFile, FileEdit
+from server.yaml_util import dump_yaml, load_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +185,7 @@ class RealGitHubClient:
             return edit.content
         if isinstance(edit, EditFile):
             document = self._get_yaml_file(edit.path, ref=base_branch)
-            return yaml.safe_dump(edit.patch(document), sort_keys=False)
+            return dump_yaml(edit.patch(document))
         raise TypeError(f"Unknown FileEdit type: {type(edit)!r}")
 
     def _get_yaml_file(self, path: str, *, ref: str) -> dict:
@@ -193,7 +194,7 @@ class RealGitHubClient:
             return {}
         _raise_for_status(response)
         content = base64.b64decode(response.json()["content"]).decode("utf-8")
-        return yaml.safe_load(content) or {}
+        return load_yaml(content)
 
     def _create_blob(self, content: str) -> str:
         return self._post(f"/repos/{self.repo}/git/blobs", {"content": content, "encoding": "utf-8"})["sha"]

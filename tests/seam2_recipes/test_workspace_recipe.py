@@ -77,6 +77,29 @@ def test_add_business_domain_patch_produces_the_expected_file_diff():
     assert after == expected
 
 
+def test_dump_yaml_diff_only_adds_new_domain_with_exact_indentation_and_quotes():
+    import difflib
+    from server.yaml_util import dump_yaml, load_yaml
+
+    before_text = (GOLDEN_DIR / "foundation_before.yaml").read_text()
+    doc = load_yaml(before_text)
+    patch = add_business_domain_patch(domains=["finance"], environment="sbx")
+    patched = patch(doc)
+    rendered = dump_yaml(patched)
+
+    diff = list(
+        difflib.unified_diff(
+            before_text.splitlines(keepends=True),
+            rendered.splitlines(keepends=True),
+        )
+    )
+    removed_lines = [line for line in diff if line.startswith("-") and not line.startswith("---")]
+    added_lines = [line for line in diff if line.startswith("+") and not line.startswith("+++")]
+
+    assert removed_lines == [], f"Unexpected removed/changed lines: {removed_lines}"
+    assert added_lines == ['+        - "finance"\n'], f"Unexpected added lines: {added_lines}"
+
+
 def test_add_business_domain_patch_is_idempotent():
     before = yaml.safe_load((GOLDEN_DIR / "foundation_before.yaml").read_text())
 

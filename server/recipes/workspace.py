@@ -13,6 +13,7 @@ from typing import Any, Callable, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from server.recipes.framework import AddFile, EditFile, OutputRef, Playbook, Recipe, StepSpec
+from server.yaml_util import QuotedStr
 
 _WORKSPACE_ID_PLACEHOLDER = "${steps.create.outputs.workspace_id}"
 
@@ -118,12 +119,12 @@ def add_business_domain_patch(
                     "uuid": default_uuid or str(uuid.uuid4()),
                 },
                 "spec": {
-                    "source": "/src/bundles/core_infrastructure/foundation",
+                    "source": QuotedStr("/src/bundles/core_infrastructure/foundation"),
                 },
                 "environments": {
                     environment: {
                         "inputs": {
-                            "business_domains": ["controltower"],
+                            "business_domains": [QuotedStr("controltower")],
                         }
                     }
                 },
@@ -142,7 +143,7 @@ def add_business_domain_patch(
                     src_bds = env_val.get("inputs", {}).get("business_domains", [])
                     for d in src_bds:
                         if d not in target_bds:
-                            target_bds.append(d)
+                            target_bds.append(QuotedStr(d) if not isinstance(d, QuotedStr) else d)
 
         env_config = envs.setdefault(environment, {})
         inputs = env_config.setdefault("inputs", {})
@@ -150,7 +151,7 @@ def add_business_domain_patch(
 
         for domain in domains:
             if domain not in existing_domains:
-                existing_domains.append(domain)
+                existing_domains.append(QuotedStr(domain))
 
         return doc
 
