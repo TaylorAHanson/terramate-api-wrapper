@@ -81,7 +81,7 @@ def foundation_config_path(environment: str = "sbx") -> str:
 
 def render_foundation_config(params: WorkspaceParams) -> str:
     """The Foundation stack's Terramate bundle instance config file."""
-    domains_yaml = "\n".join(f'          - "{domain}"' for domain in params.business_domains)
+    domains_yaml = "\n".join(f'        - "{domain}"' for domain in params.business_domains)
     return (
         "apiVersion: terramate.io/cli/v1\n"
         "kind: BundleInstance\n"
@@ -90,10 +90,10 @@ def render_foundation_config(params: WorkspaceParams) -> str:
         f"  uuid: {params.uuid}\n"
         "spec:\n"
         '  source: "/src/bundles/core_infrastructure/foundation"\n'
-        "  environments:\n"
-        f"    {params.environment}:\n"
-        "      inputs:\n"
-        "        business_domains:\n"
+        "environments:\n"
+        f"  {params.environment}:\n"
+        "    inputs:\n"
+        "      business_domains:\n"
         f"{domains_yaml}\n"
     )
 
@@ -119,18 +119,31 @@ def add_business_domain_patch(
                 },
                 "spec": {
                     "source": "/src/bundles/core_infrastructure/foundation",
-                    "environments": {
-                        environment: {
-                            "inputs": {
-                                "business_domains": ["controltower"],
-                            }
+                },
+                "environments": {
+                    environment: {
+                        "inputs": {
+                            "business_domains": ["controltower"],
                         }
-                    },
+                    }
                 },
             }
 
+        # Clean up any misplaced spec.environments and merge into top-level environments
         spec = doc.setdefault("spec", {})
-        envs = spec.setdefault("environments", {})
+        misplaced_envs = spec.pop("environments", None)
+        envs = doc.setdefault("environments", {})
+        if misplaced_envs and isinstance(misplaced_envs, dict):
+            for env_name, env_val in misplaced_envs.items():
+                target_env = envs.setdefault(env_name, {})
+                if isinstance(env_val, dict):
+                    target_inputs = target_env.setdefault("inputs", {})
+                    target_bds = target_inputs.setdefault("business_domains", [])
+                    src_bds = env_val.get("inputs", {}).get("business_domains", [])
+                    for d in src_bds:
+                        if d not in target_bds:
+                            target_bds.append(d)
+
         env_config = envs.setdefault(environment, {})
         inputs = env_config.setdefault("inputs", {})
         existing_domains = inputs.setdefault("business_domains", [])

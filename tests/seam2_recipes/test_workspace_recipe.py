@@ -60,10 +60,11 @@ def test_workspace_recipe_uses_sbx_environment_and_edits_foundation():
     # Test patch execution
     before = yaml.safe_load((GOLDEN_DIR / "foundation_before.yaml").read_text())
     after = edit.patch(before)
-    assert after["spec"]["environments"]["sbx"]["inputs"]["business_domains"] == [
+    assert after["environments"]["sbx"]["inputs"]["business_domains"] == [
         "controltower",
         "finance",
     ]
+    assert "environments" not in after.get("spec", {})
 
 
 def test_add_business_domain_patch_produces_the_expected_file_diff():
@@ -83,7 +84,38 @@ def test_add_business_domain_patch_is_idempotent():
     after = patch(before)
 
     # controltower was already in before, so it must not be duplicated
-    assert after["spec"]["environments"]["sbx"]["inputs"]["business_domains"] == ["controltower"]
+    assert after["environments"]["sbx"]["inputs"]["business_domains"] == ["controltower"]
+
+
+def test_add_business_domain_patch_heals_misplaced_spec_environments():
+    # If a document previously had environments under spec, patch cleans it up
+    doc_with_duplicate = {
+        "apiVersion": "terramate.io/cli/v1",
+        "kind": "BundleInstance",
+        "metadata": {"name": "foundation", "uuid": "ef845e8f-8f75-474b-9133-95d1aa65e6b9"},
+        "spec": {
+            "source": "/src/bundles/core_infrastructure/foundation",
+            "environments": {
+                "sbx": {
+                    "inputs": {"business_domains": ["finance"]}
+                }
+            },
+        },
+        "environments": {
+            "sbx": {
+                "inputs": {"business_domains": ["controltower"]}
+            }
+        },
+    }
+
+    patch = add_business_domain_patch(domains=["finance"], environment="sbx")
+    healed = patch(doc_with_duplicate)
+
+    assert "environments" not in healed["spec"]
+    assert healed["environments"]["sbx"]["inputs"]["business_domains"] == [
+        "controltower",
+        "finance",
+    ]
 
 
 def test_add_business_domain_patch_initializes_empty_document():
@@ -94,8 +126,9 @@ def test_add_business_domain_patch_initializes_empty_document():
 
     assert result["apiVersion"] == "terramate.io/cli/v1"
     assert result["metadata"]["uuid"] == "custom-uuid"
-    assert "sbx" in result["spec"]["environments"]
-    assert result["spec"]["environments"]["sbx"]["inputs"]["business_domains"] == [
+    assert "environments" not in result["spec"]
+    assert "sbx" in result["environments"]
+    assert result["environments"]["sbx"]["inputs"]["business_domains"] == [
         "controltower",
         "finance",
     ]

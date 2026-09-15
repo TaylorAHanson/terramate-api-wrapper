@@ -70,9 +70,9 @@ def test_foundation_request_opens_pr_with_correct_yaml_and_path(db_session):
     edit = pr.edits[0]
     assert edit.path == "src/configs/sbx/core_infrastructure/foundation/foundation.tm.yml"
     patched = edit.patch(
-        {"spec": {"environments": {"sbx": {"inputs": {"business_domains": ["controltower"]}}}}}
+        {"environments": {"sbx": {"inputs": {"business_domains": ["controltower"]}}}}
     )
-    assert patched["spec"]["environments"]["sbx"]["inputs"]["business_domains"] == ["controltower"]
+    assert patched["environments"]["sbx"]["inputs"]["business_domains"] == ["controltower"]
 
     # Advance to terminal: no outputs required
     report = client.put(
@@ -109,9 +109,9 @@ def test_foundation_request_with_custom_business_domain(db_session):
     edit = fake.opened_pull_requests[0].edits[0]
     assert edit.path == "src/configs/sbx/core_infrastructure/foundation/foundation.tm.yml"
     patched = edit.patch(
-        {"spec": {"environments": {"sbx": {"inputs": {"business_domains": ["controltower"]}}}}}
+        {"environments": {"sbx": {"inputs": {"business_domains": ["controltower"]}}}}
     )
-    assert patched["spec"]["environments"]["sbx"]["inputs"]["business_domains"] == [
+    assert patched["environments"]["sbx"]["inputs"]["business_domains"] == [
         "controltower",
         "wealth-management",
     ]
