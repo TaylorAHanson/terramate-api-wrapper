@@ -67,6 +67,8 @@ resources:
             value_from: github-pat
           - name: GITHUB_REPO
             value: "${var.github_repo}"
+          - name: GITHUB_BASE_BRANCH
+            value: "${var.github_base_branch}"
           # How often the in-process reconcile driver (server/scheduler.py, the
           # motor that advances Steps) calls the engine. Optional; the app
           # defaults to 15s if unset.
@@ -113,6 +115,11 @@ variables:
       (fixtures/terraform-fixture-repo) until Phase 2's cutover to the real
       Terramate repo (architecture.md §3.1).
     default: "TaylorAHanson/terramate-fixture-repo"
+  github_base_branch:
+    description: >-
+      Base branch that the API branches off of and opens PRs against in the
+      Terramate repo (server.orchestrator). Defaults to "main".
+    default: "main"
   admin_principals:
     description: >-
       Comma-separated forwarded identities (X-Forwarded-Email /
@@ -143,6 +150,7 @@ targets:
     variables:
       environment: "dev"
       app_name: "terramate-api-wrapper-dev"
+      github_base_branch: "develop"
       run_migrations_on_startup: "true"
       # Placeholder dev identities so `bundle run -t dev` boots without needing
       # --var (empty values are rejected at app startup). Override per deploy

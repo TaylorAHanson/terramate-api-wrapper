@@ -183,10 +183,11 @@ def _claim_and_open_next(session: Session, github_client: GitHubClient) -> bool:
         )
         body += f"\n\nResolved inputs:\n{lines}"
 
+    base_branch = settings.github_base_branch
     with correlate(request_id=step.request_id, step_key=step.key, ordinal=step.ordinal):
         pr = github_client.open_pull_request(
             branch_name=f"provision/{step.request_id}/{step.key}",
-            base_branch="main",
+            base_branch=base_branch,
             title=f"{step.request.type}: {step.key}",
             body=body,
             edits=_resolve_edits(step, resolved),

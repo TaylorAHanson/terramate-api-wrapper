@@ -21,6 +21,10 @@ class Settings:
     # never construct a real client.
     github_repo: str | None
 
+    # Base branch that `RealGitHubClient` branches off of and opens PRs against
+    # in the Terramate repo. Defaults to "main".
+    github_base_branch: str
+
     # Local/dev/test override: a full SQLAlchemy connection string to a plain
     # Postgres instance. When set, `server.database` skips the Lakebase OAuth
     # credential flow entirely. This is how tests point at a real test
@@ -88,6 +92,7 @@ def get_settings() -> Settings:
         app_environment=os.environ.get("APP_ENVIRONMENT", "local"),
         github_pat=os.environ.get("GITHUB_PAT") or None,
         github_repo=os.environ.get("GITHUB_REPO") or None,
+        github_base_branch=os.environ.get("GITHUB_BASE_BRANCH", "main"),
         database_url=os.environ.get("DATABASE_URL") or None,
         pg_host=os.environ.get("PGHOST"),
         pg_port=os.environ.get("PGPORT"),
