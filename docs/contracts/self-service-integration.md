@@ -86,10 +86,10 @@ replay is resolved **before** the intake gate is checked (a replay of an
 already-accepted request succeeds even if intake later closed).
 
 The body is a **discriminated union on `type`** (also published live at
-`/openapi.json`). Two types exist today:
+`/openapi.json`). Two primary types exist today:
 
 - `schema` — add a schema to an existing catalog.
-- `workspace` (aliased as `foundation`) — provision a workspace domain in the Foundation stack.
+- `workspace` (aliased as `foundation` or `network_foundation`) — provision a workspace domain in the Network Foundation stack.
 
 ### `type: "schema"` — add a schema to an existing catalog
 
@@ -114,15 +114,16 @@ The body is a **discriminated union on `type`** (also published live at
 
 One Step (`add-schema`), no apply-derived outputs.
 
-### `type: "workspace"` (or `type: "foundation"`) — provision a domain in the Foundation stack
+### `type: "workspace"` (or `type: "foundation"`, `type: "network_foundation"`) — provision a domain in the Network Foundation stack
 
-Registers a new business domain (e.g. `finance`) under the Terramate bundle configuration for the target environment (`sbx`). Opens a pull request editing `src/configs/{environment}/core_infrastructure/foundation/foundation.tm.yml` to append the business domain under `inputs.business_domains`.
+Registers a new business domain (e.g. `finance`) under the Terramate bundle configuration for the target environment (`sbx`). Opens a pull request editing `src/configs/{environment}/core_infrastructure/network_foundation/network_foundation.tm.yml` to append the business domain and its `subnet_size` under `inputs.business_domains`.
 
 ```json
 {
   "type": "workspace",
   "params": {
     "business_domain": "finance",
+    "subnet_size": "small",
     "name": "finance",
     "environment": "sbx"
   }
@@ -132,6 +133,7 @@ Registers a new business domain (e.g. `finance`) under the Terramate bundle conf
 | Param | Required | Default | Meaning |
 |---|---|---|---|
 | `business_domain` | no | `"controltower"` | Business domain to add to `inputs.business_domains`. |
+| `subnet_size` | no | `"small"` | Subnet size allocation: `"small"`, `"medium"`, or `"large"`. |
 | `name` | no | `business_domain` | Identifier/name for the workspace request. |
 | `environment` | no | `"sbx"` | Target environment key in the bundle configuration. |
 | `business_domains` | no | `["controltower"]` | List of business domains (automatically kept in sync with `business_domain`). |
@@ -140,7 +142,11 @@ Registers a new business domain (e.g. `finance`) under the Terramate bundle conf
 | `domain_owner` | no | `null` | Optional / legacy parameter (ignored during foundation step). |
 | `groups` | no | `[]` | Optional / legacy parameter (ignored during foundation step). |
 
-One Step (`foundation`), no apply-derived outputs. The resulting PR appends the domain to `src/configs/sbx/core_infrastructure/foundation/foundation.tm.yml` without altering existing domains or keys.
+Two Steps (executed sequentially as separate pull requests):
+1. `network_foundation` — opens a PR editing `src/configs/{environment}/core_infrastructure/network_foundation/network_foundation.tm.yml` to append the business domain with its `subnet_size` (defaults to `"small"`).
+2. `business_domain` — depends on `network_foundation`. Once PR 1 is merged and applied, opens a PR creating (or updating if adding an environment) `src/configs/{environment}/domain_stacks/business_domain/{domain}/business_domain_{domain}.tm.yml`.
+
+Neither step requires apply-derived outputs.
 
 ### Responses
 
@@ -163,15 +169,20 @@ Returns the full request with its Steps:
 
 ```json
 {
-  "id": "…", "type": "workspace", "params": { "business_domain": "finance", "name": "finance" },
+  "id": "…", "type": "workspace", "params": { "business_domain": "finance", "subnet_size": "small", "name": "finance" },
   "version": "v1", "requester": "…",
   "status": "in_progress",
   "created_at": "…", "updated_at": "…",
   "steps": [
     {
-      "ordinal": 0, "key": "foundation", "status": "submitted",
+      "ordinal": 0, "key": "network_foundation", "status": "submitted",
       "pr_number": 42, "pr_url": "https://github.com/…/pull/42",
       "depends_on": [], "stuck": false, "status_changed_at": "…"
+    },
+    {
+      "ordinal": 1, "key": "business_domain", "status": "queued",
+      "pr_number": null, "pr_url": null,
+      "depends_on": ["network_foundation"], "stuck": false, "status_changed_at": "…"
     }
   ]
 }

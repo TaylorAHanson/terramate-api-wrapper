@@ -8,10 +8,11 @@ from __future__ import annotations
 
 from server.recipes.framework import Recipe
 from server.recipes.schema import SchemaRecipe
-from server.recipes.workspace import FoundationRecipe, WorkspaceRecipe
+from server.recipes.workspace import FoundationRecipe, NetworkFoundationRecipe, WorkspaceRecipe
 
 RECIPES: dict[str, Recipe] = {
     "schema": SchemaRecipe(),
     "workspace": WorkspaceRecipe(),
     "foundation": FoundationRecipe(),
+    "network_foundation": NetworkFoundationRecipe(),
 }

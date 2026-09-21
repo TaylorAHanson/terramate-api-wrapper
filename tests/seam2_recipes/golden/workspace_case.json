@@ -3,13 +3,27 @@
     {
       "bundle_edits": [
         {
-          "path": "src/configs/sbx/core_infrastructure/foundation/foundation.tm.yml",
+          "path": "src/configs/sbx/core_infrastructure/network_foundation/network_foundation.tm.yml",
           "type": "edit_file"
         }
       ],
       "consumes": [],
       "depends_on": [],
-      "key": "foundation",
+      "key": "network_foundation",
+      "produces": []
+    },
+    {
+      "bundle_edits": [
+        {
+          "path": "src/configs/sbx/domain_stacks/business_domain/controltower/business_domain_controltower.tm.yml",
+          "type": "edit_file"
+        }
+      ],
+      "consumes": [],
+      "depends_on": [
+        "network_foundation"
+      ],
+      "key": "business_domain",
       "produces": []
     }
   ]

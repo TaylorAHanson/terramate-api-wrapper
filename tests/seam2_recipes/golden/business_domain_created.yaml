@@ -1,0 +1,16 @@
+apiVersion: terramate.io/cli/v1
+kind: BundleInstance
+metadata:
+  name: business_domain_controltower
+  uuid: "18b50cb1-f2ca-402a-af0f-6c97b8dfde0e"
+spec:
+  source: "/src/bundles/domain_stacks/business_domain"
+environments:
+  sbx:
+    inputs:
+      network_foundation: "network_foundation"
+      domain_name: "controltower"
+      domain_role_permissions:
+        admin: []
+        user: []
+      storage_configuration_id: ""

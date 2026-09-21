@@ -30,6 +30,7 @@ otherwise hang forever — ADR-0004 "Consequences").
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import socket
@@ -153,9 +154,18 @@ def _claim_and_open_next(session: Session, github_client: GitHubClient) -> bool:
         session.commit()
         return True
 
+    metadata = {
+        "request_id": step.request_id,
+        "ordinal": step.ordinal,
+        "step_key": step.key,
+        "type": step.request.type,
+    }
+    metadata_json = json.dumps(metadata)
     body = (
+        f"<!-- provisioning-metadata: {metadata_json} -->\n"
         f"Automated by the provisioning API for step `{step.key}` "
-        f"of request `{step.request_id}`."
+        f"(ordinal {step.ordinal}) of request `{step.request_id}`.\n\n"
+        f"```json:provisioning-metadata\n{json.dumps(metadata, indent=2)}\n```"
     )
     resolved = _resolve_consumes(session, step)
     if resolved:

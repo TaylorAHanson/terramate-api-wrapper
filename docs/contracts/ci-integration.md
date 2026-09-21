@@ -49,20 +49,43 @@ is a push **from you** (ADR-0004).
 
 ---
 
-## 1. Branch naming (API → you)
+## 1. PR identification & metadata (API → you)
 
-The API opens **one PR per Step**, from a branch named exactly:
+The API opens **one PR per Step**, from a branch named:
 
 ```
 provision/<request_id>/<step_key>
 ```
 
 - `<request_id>` — a UUID.
-- `<step_key>` — e.g. `foundation`, `add-schema`.
+- `<step_key>` — e.g. `network_foundation`, `business_domain`, `add-schema`.
 
-This branch name is the **only** context your CI has about which Step it is
-acting on, so parse it from the PR head ref. Bundle file edits are already
-committed on the branch; the PR targets `main`.
+### Embedded JSON metadata in PR description
+
+To avoid fragile parsing of ref names or needing extra `GET` calls to find the step ordinal, every PR description embeds machine-parseable JSON metadata as an HTML comment and a readable block:
+
+```markdown
+<!-- provisioning-metadata: {"request_id": "019283-abc...", "ordinal": 0, "step_key": "network_foundation", "type": "workspace"} -->
+Automated by the provisioning API for step `network_foundation` (ordinal 0) of request `019283-abc...`.
+
+```json:provisioning-metadata
+{
+  "request_id": "019283-abc...",
+  "ordinal": 0,
+  "step_key": "network_foundation",
+  "type": "workspace"
+}
+```
+```
+
+In GitHub Actions, you can parse the metadata directly from `github.event.pull_request.body`:
+```bash
+# Extract JSON directly using grep/sed or jq:
+METADATA=$(echo "$PR_BODY" | grep -o '<!-- provisioning-metadata: .* -->' | sed 's/<!-- provisioning-metadata: //;s/ -->//')
+REQUEST_ID=$(echo "$METADATA" | jq -r .request_id)
+ORDINAL=$(echo "$METADATA" | jq -r .ordinal)
+STEP_KEY=$(echo "$METADATA" | jq -r .step_key)
+```
 
 ## 2. Plan (optional — for humans, not the API)
 
@@ -83,16 +106,35 @@ Every Step ends in exactly one push to the API:
 
 For a merged PR: check out the **merge commit**, run `terraform apply`, then
 report. For a closed-unmerged PR: report `rejected` immediately (no Terraform
-runs). In both cases, parse `request_id` + `step_key` from the PR head branch
-and resolve `step_key → ordinal` via `GET /v1/requests/{request_id}` (the report
-endpoint is ordinal-scoped).
+runs).
 
 ---
 
-## The report endpoint
+## The report endpoints
 
+You can report outcomes in any of the following three ways:
+
+### Option A: By `step_key` in the URL (Recommended)
+No need to lookup or parse the ordinal! You can use the `step_key` parsed from the branch name or PR metadata:
+```
+PUT /v1/requests/{request_id}/steps/{step_key}/outputs
+```
+
+### Option B: Direct request-level PUT
+Report directly to the request endpoint. The API automatically resolves the currently `submitted` step (or you can pass `"step_key"` or `"ordinal"` in the JSON body):
+```
+PUT /v1/requests/{request_id}/outputs
+```
+
+### Option C: By `ordinal` in the URL
+The classic ordinal-scoped route:
 ```
 PUT /v1/requests/{request_id}/steps/{ordinal}/outputs
+```
+
+### Request Headers & Body
+
+```
 Content-Type: application/json
 Authorization: Bearer <token>   # see Auth below
 ```
@@ -107,11 +149,17 @@ Authorization: Bearer <token>   # see Auth below
 }
 ```
 
+Optional body fields:
+- `step_key`: step identifier string (e.g. `"network_foundation"`) when calling `PUT /v1/requests/{request_id}/outputs`.
+- `ordinal`: integer ordinal when calling `PUT /v1/requests/{request_id}/outputs`.
+
 | Field | Meaning |
 |---|---|
 | `status` | **Required.** One of `done`, `failed`, `rejected`. |
 | `outputs` | Apply-derived values, **keyed by the output names the Step declares** (see "Output names" below). JSON-serializable. Only meaningful for `done`; omit or send `{}` otherwise. |
 | `tf_console` | Raw apply console text. Send it for `done`/`failed`; a `rejected` PR never applied, so it has none. Optional — defaults to empty. |
+| `step_key` | Optional step key if using `PUT /v1/requests/{request_id}/outputs`. |
+| `ordinal` | Optional ordinal if using `PUT /v1/requests/{request_id}/outputs`. |
 
 **Responses:**
 
@@ -136,7 +184,9 @@ Each Recipe defines these. For the current Recipes:
 
 | Step key | Must emit outputs (on `done`) |
 |---|---|
-| `foundation` (`workspace`) | *(none — `outputs` dict may be empty `{}`)* |
+| `network_foundation` (`workspace` / `network_foundation`) | *(none — `outputs` dict may be empty `{}`)* |
+| `business_domain` (`workspace` / `network_foundation`) | *(none — `outputs` dict may be empty `{}`)* |
+| `foundation` (`foundation` legacy alias) | *(none — `outputs` dict may be empty `{}`)* |
 | `add-schema` (`schema`) | *(none — `outputs` dict may be empty `{}`)* |
 
 If a Step reports `done` without an output that a dependent Step consumes, that

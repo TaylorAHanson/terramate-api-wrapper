@@ -109,20 +109,30 @@ def test_resolve_edits_is_a_no_op_substitution_for_a_step_with_no_consumes():
         "workspace",
         {"name": "analytics"},
     )
-    step = _step(request, "foundation")
+    step = _step(request, "network_foundation")
 
     edits = orchestrator._resolve_edits(step, resolved=[])
 
     assert len(edits) == 1
     assert isinstance(edits[0], EditFile)
-    assert edits[0].path == "src/configs/sbx/core_infrastructure/foundation/foundation.tm.yml"
+    assert edits[0].path == "src/configs/sbx/core_infrastructure/network_foundation/network_foundation.tm.yml"
     patched = edits[0].patch(
-        {"environments": {"sbx": {"inputs": {"business_domains": ["controltower"]}}}}
+        {"environments": {"sbx": {"inputs": {"business_domains": {"controltower": {"subnet_size": "small"}}}}}}
     )
-    assert patched["environments"]["sbx"]["inputs"]["business_domains"] == [
-        "controltower",
-        "analytics",
-    ]
+    assert patched["environments"]["sbx"]["inputs"]["business_domains"] == {
+        "controltower": {"subnet_size": "small"},
+        "analytics": {"subnet_size": "small"},
+    }
+
+    # Step 2: business_domain
+    step2 = _step(request, "business_domain", depends_on=["network_foundation"])
+    edits2 = orchestrator._resolve_edits(step2, resolved=[])
+    assert len(edits2) == 1
+    assert isinstance(edits2[0], EditFile)
+    assert edits2[0].path == "src/configs/sbx/domain_stacks/business_domain/analytics/business_domain_analytics.tm.yml"
+    doc2 = edits2[0].patch({})
+    assert doc2["metadata"]["name"] == "business_domain_analytics"
+    assert doc2["environments"]["sbx"]["inputs"]["domain_name"] == "analytics"
 
 
 def test_resolve_edits_for_schema_recipe_single_step():
