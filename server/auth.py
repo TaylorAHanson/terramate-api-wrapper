@@ -73,15 +73,17 @@ def require_ci_principal(
     #55): the caller must resolve to a trusted forwarded identity (same
     platform-stamped-header trust model as `resolve_requester`/`require_admin`
     — never a client-controlled header) that also appears on the
-    `CI_PRINCIPALS` allowlist, the CI M2M service principal a Step's GitHub
-    Action authenticates as. No resolvable identity is `401`,
+    `CI_PRINCIPALS` allowlist (or `ADMIN_PRINCIPALS` allowlist for operator
+    manual intervention/testing), the CI M2M service principal a Step's
+    GitHub Action authenticates as. No resolvable identity is `401`,
     resolved-but-not-allowed is `403` — either way, no state changes.
     """
     identity = _forwarded_identity(x_forwarded_email, x_forwarded_user)
     if identity is None:
         logger.warning("ci_auth_rejected reason=no_forwarded_identity")
         raise HTTPException(status_code=401, detail="No resolvable caller identity")
-    if identity not in get_settings().ci_principals:
+    settings = get_settings()
+    if identity not in settings.ci_principals and identity not in settings.admin_principals:
         logger.warning("ci_auth_rejected reason=not_authorized identity=%s", identity)
         raise HTTPException(status_code=403, detail="Not authorized")
     logger.info("ci_auth_accepted identity=%s", identity)

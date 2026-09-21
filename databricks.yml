@@ -148,8 +148,8 @@ targets:
       # --var (empty values are rejected at app startup). Override per deploy
       # with the real operator/CI principal, e.g.
       #   --var="admin_principals=you@example.com" --var="ci_principals=…"
-      admin_principals: "dev-admin@example.com"
-      ci_principals: "dev-ci@example.com"
+      admin_principals: "taylhans@qualcomm.com,dev-admin@example.com"
+      ci_principals: "taylhans@qualcomm.com,dev-ci@example.com"
   prod:
     mode: production
     variables:
