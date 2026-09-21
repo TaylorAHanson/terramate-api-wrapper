@@ -215,19 +215,15 @@ def get_request(request_id: str, session: Session = Depends(get_db)) -> RequestD
     return _to_response(request_row)
 
 
-def _find_step(session: Session, request_id: str, step_identifier: str | int) -> Step | None:
-    if isinstance(step_identifier, int) or (isinstance(step_identifier, str) and step_identifier.isdigit()):
-        return session.scalars(
-            select(Step).where(Step.request_id == request_id, Step.ordinal == int(step_identifier))
-        ).first()
+def _find_step(session: Session, request_id: str, ordinal: int) -> Step | None:
     return session.scalars(
-        select(Step).where(Step.request_id == request_id, Step.key == str(step_identifier))
+        select(Step).where(Step.request_id == request_id, Step.ordinal == ordinal)
     ).first()
 
 
-@router.get("/v1/requests/{request_id}/steps/{step_identifier}", response_model=StepOut)
-def get_step(request_id: str, step_identifier: str, session: Session = Depends(get_db)) -> StepOut:
-    step = _find_step(session, request_id, step_identifier)
+@router.get("/v1/requests/{request_id}/steps/{ordinal}", response_model=StepOut)
+def get_step(request_id: str, ordinal: int, session: Session = Depends(get_db)) -> StepOut:
+    step = _find_step(session, request_id, ordinal)
     if step is None:
         raise HTTPException(status_code=404, detail="Step not found")
     return _step_to_out(step)
@@ -242,8 +238,6 @@ class OutputReportRequest(BaseModel):
     status: Literal["done", "failed", "rejected"]
     outputs: dict = Field(default_factory=dict)
     tf_console: str = ""
-    step_key: str | None = None
-    ordinal: int | None = None
 
 
 class OutputReportResponse(BaseModel):
@@ -262,10 +256,10 @@ class OutputReportResponse(BaseModel):
 _REPORTABLE_STEP_STATUSES = {"submitted", "done", "failed", "rejected"}
 
 
-@router.put("/v1/requests/{request_id}/steps/{step_identifier}/outputs", response_model=OutputReportResponse)
+@router.put("/v1/requests/{request_id}/steps/{ordinal}/outputs", response_model=OutputReportResponse)
 def report_step_outputs(
     request_id: str,
-    step_identifier: str,
+    ordinal: int,
     body: OutputReportRequest,
     # The CI M2M service principal a Step's pipeline authenticates as (#47,
     # #55) — this ingress writes provisioning truth, so it is gated the same
@@ -275,16 +269,18 @@ def report_step_outputs(
     session: Session = Depends(get_db),
 ) -> OutputReportResponse:
     """`PUT /v1/requests/{id}/steps/{n}/outputs` (ADR-0003/ADR-0004) — the HTTP
-    ingress a Step's CI calls with its terminal outcome. `step_identifier` can
-    be either an integer ordinal (e.g. `0`, `1`) or a step key (e.g.
-    `network_foundation`, `business_domain`).
+    ingress a Step's CI calls with its terminal outcome. Resolves the
+    step-scoped path to a Step row and delegates to the persistence seam
+    (`orchestrator.record_apply_result`, #54); this route does not
+    re-implement the transition/upsert logic itself, only validation, Step
+    resolution, and the wrong-state policy below.
     """
-    step = _find_step(session, request_id, step_identifier)
+    step = _find_step(session, request_id, ordinal)
     if step is None:
         logger.warning(
-            "apply_result_rejected reason=step_not_found request_id=%s step_identifier=%s",
+            "apply_result_rejected reason=step_not_found request_id=%s ordinal=%s",
             request_id,
-            step_identifier,
+            ordinal,
         )
         raise HTTPException(status_code=404, detail="Step not found")
 
@@ -293,7 +289,7 @@ def report_step_outputs(
             "apply_result_rejected reason=wrong_step_state request_id=%s step=%s ordinal=%s status=%s",
             request_id,
             step.key,
-            step.ordinal,
+            ordinal,
             step.status,
         )
         raise HTTPException(
@@ -310,69 +306,7 @@ def report_step_outputs(
         "apply_result_accepted request_id=%s step=%s ordinal=%s outcome=%s status=%s",
         request_id,
         step.key,
-        step.ordinal,
-        body.status,
-        step.status,
-    )
-    return OutputReportResponse(ordinal=step.ordinal, key=step.key, status=step.status)
-
-
-@router.put("/v1/requests/{request_id}/outputs", response_model=OutputReportResponse)
-def report_request_outputs(
-    request_id: str,
-    body: OutputReportRequest,
-    ci_principal: str = Depends(require_ci_principal),
-    session: Session = Depends(get_db),
-) -> OutputReportResponse:
-    """Direct `PUT /v1/requests/{request_id}/outputs` convenience endpoint.
-
-    Allows CI to report step outcomes without querying or specifying the ordinal.
-    Resolves the step via `body.step_key`, `body.ordinal`, or automatically
-    resolves when there is a single active (`submitted`) step on the request.
-    """
-    request_row = session.get(ProvisioningRequest, request_id)
-    if request_row is None:
-        raise HTTPException(status_code=404, detail="Request not found")
-
-    step: Step | None = None
-    if body.ordinal is not None:
-        step = _find_step(session, request_id, body.ordinal)
-    elif body.step_key is not None:
-        step = _find_step(session, request_id, body.step_key)
-    else:
-        submitted_steps = [s for s in request_row.steps if s.status == "submitted"]
-        if len(submitted_steps) == 1:
-            step = submitted_steps[0]
-        elif len(submitted_steps) > 1:
-            raise HTTPException(
-                status_code=400,
-                detail="Multiple steps currently submitted; specify 'step_key' or 'ordinal'",
-            )
-        else:
-            reportable_steps = [s for s in request_row.steps if s.status in _REPORTABLE_STEP_STATUSES]
-            if len(reportable_steps) == 1:
-                step = reportable_steps[0]
-
-    if step is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Could not resolve target step to report on. Provide 'step_key' or 'ordinal'.",
-        )
-
-    if step.status not in _REPORTABLE_STEP_STATUSES:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Step is not in a state that accepts an apply report: {step.status}",
-        )
-
-    orchestrator.record_apply_result(
-        session, step, outcome=body.status, outputs=body.outputs, tf_console=body.tf_console
-    )
-    logger.info(
-        "apply_result_accepted request_id=%s step=%s ordinal=%s outcome=%s status=%s",
-        request_id,
-        step.key,
-        step.ordinal,
+        ordinal,
         body.status,
         step.status,
     )

@@ -65,7 +65,7 @@ provision/<request_id>/<step_key>
 To avoid fragile parsing of ref names or needing extra `GET` calls to find the step ordinal, every PR description embeds machine-parseable JSON metadata as an HTML comment and a readable block:
 
 ```markdown
-<!-- provisioning-metadata: {"request_id": "019283-abc...", "ordinal": 0, "step_key": "network_foundation", "type": "workspace"} -->
+<!-- provisioning-metadata: {"request_id": "019283-abc...", "ordinal": 0, "step_key": "network_foundation", "type": "workspace", "outputs_url": "https://<app>/v1/requests/019283-abc.../steps/0/outputs"} -->
 Automated by the provisioning API for step `network_foundation` (ordinal 0) of request `019283-abc...`.
 
 ```json:provisioning-metadata
@@ -73,18 +73,23 @@ Automated by the provisioning API for step `network_foundation` (ordinal 0) of r
   "request_id": "019283-abc...",
   "ordinal": 0,
   "step_key": "network_foundation",
-  "type": "workspace"
+  "type": "workspace",
+  "outputs_url": "https://<app>/v1/requests/019283-abc.../steps/0/outputs"
 }
 ```
 ```
 
-In GitHub Actions, you can parse the metadata directly from `github.event.pull_request.body`:
+In GitHub Actions, you can parse `outputs_url` directly from `github.event.pull_request.body`:
 ```bash
 # Extract JSON directly using grep/sed or jq:
 METADATA=$(echo "$PR_BODY" | grep -o '<!-- provisioning-metadata: .* -->' | sed 's/<!-- provisioning-metadata: //;s/ -->//')
-REQUEST_ID=$(echo "$METADATA" | jq -r .request_id)
-ORDINAL=$(echo "$METADATA" | jq -r .ordinal)
-STEP_KEY=$(echo "$METADATA" | jq -r .step_key)
+OUTPUTS_URL=$(echo "$METADATA" | jq -r .outputs_url)
+
+# Report apply outcome directly to outputs_url — no URL assembling needed:
+curl -X PUT "$OUTPUTS_URL" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"status": "done", "outputs": {}, "tf_console": "Apply complete!"}'
 ```
 
 ## 2. Plan (optional — for humans, not the API)
@@ -110,31 +115,10 @@ runs).
 
 ---
 
-## The report endpoints
+## The report endpoint
 
-You can report outcomes in any of the following three ways:
-
-### Option A: By `step_key` in the URL (Recommended)
-No need to lookup or parse the ordinal! You can use the `step_key` parsed from the branch name or PR metadata:
-```
-PUT /v1/requests/{request_id}/steps/{step_key}/outputs
-```
-
-### Option B: Direct request-level PUT
-Report directly to the request endpoint. The API automatically resolves the currently `submitted` step (or you can pass `"step_key"` or `"ordinal"` in the JSON body):
-```
-PUT /v1/requests/{request_id}/outputs
-```
-
-### Option C: By `ordinal` in the URL
-The classic ordinal-scoped route:
 ```
 PUT /v1/requests/{request_id}/steps/{ordinal}/outputs
-```
-
-### Request Headers & Body
-
-```
 Content-Type: application/json
 Authorization: Bearer <token>   # see Auth below
 ```
@@ -149,17 +133,11 @@ Authorization: Bearer <token>   # see Auth below
 }
 ```
 
-Optional body fields:
-- `step_key`: step identifier string (e.g. `"network_foundation"`) when calling `PUT /v1/requests/{request_id}/outputs`.
-- `ordinal`: integer ordinal when calling `PUT /v1/requests/{request_id}/outputs`.
-
 | Field | Meaning |
 |---|---|
 | `status` | **Required.** One of `done`, `failed`, `rejected`. |
 | `outputs` | Apply-derived values, **keyed by the output names the Step declares** (see "Output names" below). JSON-serializable. Only meaningful for `done`; omit or send `{}` otherwise. |
 | `tf_console` | Raw apply console text. Send it for `done`/`failed`; a `rejected` PR never applied, so it has none. Optional — defaults to empty. |
-| `step_key` | Optional step key if using `PUT /v1/requests/{request_id}/outputs`. |
-| `ordinal` | Optional ordinal if using `PUT /v1/requests/{request_id}/outputs`. |
 
 **Responses:**
 

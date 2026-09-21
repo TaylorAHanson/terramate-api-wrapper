@@ -76,6 +76,12 @@ class Settings:
     # boot is opt-in per target (intended for dev/test).
     run_migrations_on_startup: bool
 
+    # Public base URL of this application deployment. Automatically populated
+    # by Databricks Apps runtime from `DATABRICKS_APP_URL`
+    # (https://<unique>.databricksapps.com), or via `API_BASE_URL` for local dev.
+    # When present, PR metadata encodes the fully-qualified `outputs_url`.
+    api_base_url: str | None
+
 
 def get_settings() -> Settings:
     return Settings(
@@ -99,4 +105,10 @@ def get_settings() -> Settings:
         ),
         run_migrations_on_startup=os.environ.get("RUN_MIGRATIONS_ON_STARTUP", "").strip().lower()
         in ("1", "true", "yes", "on"),
+        api_base_url=(
+            os.environ.get("DATABRICKS_APP_URL")
+            or os.environ.get("API_BASE_URL")
+            or os.environ.get("APP_URL")
+            or None
+        ),
     )

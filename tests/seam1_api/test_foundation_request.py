@@ -92,6 +92,7 @@ def test_foundation_request_opens_pr_with_correct_yaml_and_path(db_session):
     assert meta["ordinal"] == 0
     assert meta["step_key"] == "network_foundation"
     assert meta["type"] == "foundation"
+    assert meta["outputs_url"].endswith(f"/v1/requests/{request_id}/steps/0/outputs")
     assert "```json:provisioning-metadata" in pr1.body
 
     # Step 0 is submitted, Step 1 is still queued
@@ -99,9 +100,10 @@ def test_foundation_request_opens_pr_with_correct_yaml_and_path(db_session):
     assert detail["steps"][0]["status"] == "submitted"
     assert detail["steps"][1]["status"] == "queued"
 
-    # Step 0 finishes apply in CI: report directly via step_key in URL (no ordinal lookup needed!)
+    # Step 0 finishes apply in CI: report using outputs_url directly from PR metadata!
+    outputs_path0 = meta["outputs_url"]
     report0 = client.put(
-        f"/v1/requests/{request_id}/steps/network_foundation/outputs",
+        outputs_path0,
         headers={"X-Forwarded-User": "ci-tester"},
         json={"status": "done", "outputs": {}, "tf_console": "Step 0 Apply complete!"},
     )
@@ -118,15 +120,25 @@ def test_foundation_request_opens_pr_with_correct_yaml_and_path(db_session):
     edit2 = pr2.edits[0]
     assert edit2.path == "src/configs/sbx/domain_stacks/business_domain/controltower/business_domain_controltower.tm.yml"
 
+    # Verify Step 2 metadata
+    meta2_match = re.search(r"<!-- provisioning-metadata: (.*) -->", pr2.body)
+    assert meta2_match is not None
+    meta2 = json.loads(meta2_match.group(1))
+    assert meta2["request_id"] == request_id
+    assert meta2["ordinal"] == 1
+    assert meta2["step_key"] == "business_domain"
+    assert meta2["outputs_url"].endswith(f"/v1/requests/{request_id}/steps/1/outputs")
+
     # Verify Step 2 creates YAML when empty
     doc2 = edit2.patch({})
     assert doc2["metadata"]["name"] == "business_domain_controltower"
     assert doc2["environments"]["sbx"]["inputs"]["domain_name"] == "controltower"
     assert doc2["environments"]["sbx"]["inputs"]["network_foundation"] == "network_foundation"
 
-    # Step 1 finishes apply in CI: report directly to /v1/requests/{request_id}/outputs!
+    # Step 1 finishes apply in CI: report using outputs_url from Step 2 PR metadata
+    outputs_path1 = meta2["outputs_url"]
     report1 = client.put(
-        f"/v1/requests/{request_id}/outputs",
+        outputs_path1,
         headers={"X-Forwarded-User": "ci-tester"},
         json={"status": "done", "outputs": {}, "tf_console": "Step 1 Apply complete!"},
     )
@@ -218,9 +230,9 @@ def test_network_foundation_request_with_type_network_foundation(db_session):
         "risk": {"subnet_size": "large"},
     }
 
-    # Complete Step 0 via step_key, tick again for Step 1
+    # Complete Step 0, tick again for Step 1
     client.put(
-        f"/v1/requests/{request_id}/steps/network_foundation/outputs",
+        f"/v1/requests/{request_id}/steps/0/outputs",
         headers={"X-Forwarded-User": "ci-tester"},
         json={"status": "done", "outputs": {}},
     )
@@ -235,10 +247,10 @@ def test_network_foundation_request_with_type_network_foundation(db_session):
     assert doc2["metadata"]["name"] == "business_domain_risk"
     assert doc2["environments"]["sbx"]["inputs"]["domain_name"] == "risk"
 
-    # Complete Step 1 via direct request outputs endpoint with step_key
+    # Complete Step 1
     res = client.put(
-        f"/v1/requests/{request_id}/outputs",
+        f"/v1/requests/{request_id}/steps/1/outputs",
         headers={"X-Forwarded-User": "ci-tester"},
-        json={"status": "done", "step_key": "business_domain", "outputs": {}},
+        json={"status": "done", "outputs": {}},
     )
     assert res.status_code == 200

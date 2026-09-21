@@ -154,11 +154,19 @@ def _claim_and_open_next(session: Session, github_client: GitHubClient) -> bool:
         session.commit()
         return True
 
+    settings = get_settings()
+    base_url = (settings.api_base_url or "").rstrip("/")
+    if base_url and not base_url.startswith(("http://", "https://")):
+        base_url = f"https://{base_url}"
+    outputs_path = f"/v1/requests/{step.request_id}/steps/{step.ordinal}/outputs"
+    outputs_url = f"{base_url}{outputs_path}" if base_url else outputs_path
+
     metadata = {
         "request_id": step.request_id,
         "ordinal": step.ordinal,
         "step_key": step.key,
         "type": step.request.type,
+        "outputs_url": outputs_url,
     }
     metadata_json = json.dumps(metadata)
     body = (
