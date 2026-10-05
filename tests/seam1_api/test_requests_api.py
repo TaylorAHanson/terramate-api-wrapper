@@ -78,11 +78,11 @@ def test_unknown_type_is_rejected_synchronously():
     assert response.status_code == 422
 
 
-def test_workspace_params_missing_required_fields_are_rejected_synchronously():
+def test_workspace_params_failing_the_type_schema_are_rejected_synchronously():
     response = client.post(
         "/v1/requests",
         headers=_headers(_idempotency_key()),
-        json={"type": "workspace", "params": {}},
+        json={"type": "workspace", "params": {"subnet_size": 5}},
     )
     assert response.status_code == 422
 

@@ -1,0 +1,17 @@
+apiVersion: terramate.io/cli/v1
+kind: BundleInstance
+metadata:
+  name: controltower_sbx_unity_catalog_schema
+  uuid: "328b40c1-7e98-468c-8de2-91e60728fcb2"
+spec:
+  source: "/src/bundles/domain_stacks/data_domain/unity_catalog_schema"
+environments:
+  sbx:
+    inputs:
+      domain_name: "controltower"
+      workspace_name: "controltower_ws_sbx"
+      catalog_name: "controltower_sbx"
+      schema_list:
+        - "app_lighthouse_sync"
+        - "app_lighthouse_txn"
+        - "app_lighthouse_logs"

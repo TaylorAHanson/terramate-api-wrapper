@@ -17,7 +17,7 @@ import pytest
 import respx
 
 from server.github_client import GitHubClientError, RealGitHubClient, correlate
-from server.recipes.framework import AddFile, EditFile
+from server.recipes.framework import AddFile, EditFile, EditText
 
 REPO = "acme/fixture-repo"
 BASE_URL = "https://api.github.com"
@@ -143,6 +143,42 @@ def test_open_pull_request_applies_an_edit_file_patch_to_fetched_content(client)
 
     committed_content = _json.loads(blob_route.calls[0].request.content)["content"]
     assert "ws-42" in committed_content
+
+
+@respx.mock
+def test_open_pull_request_applies_an_edit_text_patch_to_the_raw_file(client):
+    respx.get(f"{BASE_URL}/repos/{REPO}/git/ref/heads/main").mock(
+        return_value=httpx.Response(200, json={"object": {"sha": "base-commit-sha"}})
+    )
+    respx.get(f"{BASE_URL}/repos/{REPO}/git/commits/base-commit-sha").mock(
+        return_value=httpx.Response(200, json={"tree": {"sha": "base-tree-sha"}})
+    )
+    existing_hcl = 'globals {\n  stack_ids = {\n    network_foundation = "nf"  # keep me\n  }\n}\n'
+    respx.get(f"{BASE_URL}/repos/{REPO}/contents/src/configs/sbx/sbx_config.tm.hcl").mock(
+        return_value=httpx.Response(200, json={"content": base64.b64encode(existing_hcl.encode()).decode()})
+    )
+    blob_route = respx.post(f"{BASE_URL}/repos/{REPO}/git/blobs").mock(
+        return_value=httpx.Response(201, json={"sha": "new-blob-sha"})
+    )
+    respx.post(f"{BASE_URL}/repos/{REPO}/git/trees").mock(return_value=httpx.Response(201, json={"sha": "t"}))
+    respx.post(f"{BASE_URL}/repos/{REPO}/git/commits").mock(return_value=httpx.Response(201, json={"sha": "c"}))
+    respx.post(f"{BASE_URL}/repos/{REPO}/git/refs").mock(return_value=httpx.Response(201, json={}))
+    respx.post(f"{BASE_URL}/repos/{REPO}/pulls").mock(
+        return_value=httpx.Response(201, json={"number": 9, "html_url": "https://x/pull/9"})
+    )
+
+    client.open_pull_request(
+        branch_name="provision/req-1/workspace_folder",
+        base_branch="main",
+        title="workspace_folder: workspace_folder",
+        body="body",
+        edits=[EditText("src/configs/sbx/sbx_config.tm.hcl", lambda text: text.replace("}\n}", '  x = "1"\n  }\n}'))],
+    )
+
+    import json as _json
+
+    committed_content = _json.loads(blob_route.calls[0].request.content)["content"]
+    assert committed_content == 'globals {\n  stack_ids = {\n    network_foundation = "nf"  # keep me\n    x = "1"\n  }\n}\n'
 
 
 @respx.mock

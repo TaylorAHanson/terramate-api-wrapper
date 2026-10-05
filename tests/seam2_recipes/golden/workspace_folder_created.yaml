@@ -1,0 +1,20 @@
+apiVersion: terramate.io/cli/v1
+kind: BundleInstance
+metadata:
+  name: controltower_workspace_folder
+  uuid: "7d983863-4bbc-412e-8039-dd145266ae82"
+spec:
+  source: "/src/bundles/domain_stacks/business_domain/workspace_folder"
+environments:
+  sbx:
+    inputs:
+      domain_name: "controltower"
+      workspace_name: "controltower_ws_sbx"
+      folder_names:
+        - "controltower_assets/ai_apps"
+        - "controltower_assets/ai_ml"
+        - "controltower_assets/data_aibi"
+        - "controltower_assets/data_apps"
+        - "controltower_assets/data_deng"
+        - "controltower_aibi_genie"
+        - "controltower_aibi_dashboards"

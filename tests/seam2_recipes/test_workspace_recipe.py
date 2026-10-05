@@ -9,19 +9,17 @@ from pathlib import Path
 
 import yaml
 
-from server.recipes.framework import EditFile
+from server.recipes.framework import EditFile, EditText
 from server.recipes.workspace import (
     FoundationRecipe,
     WorkspaceParams,
     WorkspaceRecipe,
     add_business_domain_patch,
-    add_business_domain_stack_patch,
     bind_workspace_patch,
-    business_domain_config_path,
-    network_foundation_config_path,
-    render_business_domain_config,
     set_owner_patch,
+    workspace_stack_patch,
 )
+from server.yaml_util import dump_yaml
 from tests.seam2_recipes.golden_harness import assert_matches_golden
 
 GOLDEN_DIR = Path(__file__).parent / "golden"
@@ -32,6 +30,7 @@ def test_workspace_recipe_matches_golden_playbook():
         name="sbx-test",
         uuid="ef845e8f-8f75-474b-9133-95d1aa65e6b9",
         business_domains=["controltower"],
+        business_domain_uuid="18b50cb1-f2ca-402a-af0f-6c97b8dfde0e",
     )
     playbook = WorkspaceRecipe().build(params)
     assert_matches_golden(playbook, GOLDEN_DIR / "workspace_case.json")
@@ -72,47 +71,50 @@ def test_workspace_recipe_uses_sbx_environment_and_edits_foundation():
     }
     assert "environments" not in after.get("spec", {})
 
-    # Step 2: business_domain
+    # Step 2: business_domain — the workspace stack file plus its stack_ids entry
     step2 = playbook.steps[1]
     assert step2.key == "business_domain"
     assert step2.produces == ()
     assert step2.consumes == ()
     assert step2.depends_on == ["network_foundation"]
-    assert len(step2.bundle_edits) == 1
-    edit2 = step2.bundle_edits[0]
-    assert isinstance(edit2, EditFile)
-    assert edit2.path == "src/configs/sbx/domain_stacks/business_domain/finance/business_domain_finance.tm.yml"
+    stack_edit, id_edit = step2.bundle_edits
+    assert isinstance(stack_edit, EditFile)
+    assert stack_edit.path == "src/configs/sbx/domain_stacks/business_domain/workspace/finance/finance_workspace.tm.yml"
+    assert isinstance(id_edit, EditText)
+    assert id_edit.path == "src/configs/sbx/sbx_config.tm.hcl"
 
-    # Step 2 creates the YAML when empty
-    doc2 = edit2.patch({})
-    assert doc2["apiVersion"] == "terramate.io/cli/v1"
-    assert doc2["metadata"]["name"] == "business_domain_finance"
-    assert doc2["spec"]["source"] == "/src/bundles/domain_stacks/business_domain"
+    doc2 = stack_edit.patch({})
+    assert doc2["metadata"]["name"] == "finance_workspace"
+    assert doc2["spec"]["source"] == "/src/bundles/domain_stacks/business_domain/workspace"
     assert doc2["environments"]["sbx"]["inputs"]["domain_name"] == "finance"
-    assert doc2["environments"]["sbx"]["inputs"]["network_foundation"] == "network_foundation"
+
+    stack_uuid = params.stack_uuids["finance"]
+    assert doc2["metadata"]["uuid"] == stack_uuid
+    config = id_edit.patch((GOLDEN_DIR / "sbx_config_before.tm.hcl").read_text())
+    assert f'    finance_workspace      = "{stack_uuid}"' in config.splitlines()
 
 
-def test_add_business_domain_stack_patch_creates_yaml_when_empty():
-    patch = add_business_domain_stack_patch(
-        domain="controltower",
-        environment="sbx",
-        default_uuid="18b50cb1-f2ca-402a-af0f-6c97b8dfde0e",
-    )
-    result = patch({})
-    expected = yaml.safe_load((GOLDEN_DIR / "business_domain_created.yaml").read_text())
-    assert result == expected
+def test_stack_uuids_are_minted_once_and_survive_a_params_round_trip():
+    params = WorkspaceParams(business_domains=["controltower", "finance"])
+    assert set(params.stack_uuids) == {"controltower", "finance"}
+
+    rebuilt = WorkspaceParams.model_validate(params.model_dump(mode="json"))
+    assert rebuilt.stack_uuids == params.stack_uuids
 
 
-def test_add_business_domain_stack_patch_edits_yaml_when_adding_env():
-    before = yaml.safe_load((GOLDEN_DIR / "business_domain_created.yaml").read_text())
-    patch = add_business_domain_stack_patch(
-        domain="controltower",
-        environment="dev",
-        default_uuid="18b50cb1-f2ca-402a-af0f-6c97b8dfde0e",
-    )
-    after = patch(before)
-    expected = yaml.safe_load((GOLDEN_DIR / "business_domain_env_added.yaml").read_text())
-    assert after == expected
+def test_workspace_stack_patch_renders_the_repo_file_exactly_when_creating():
+    patch = workspace_stack_patch("controltower", "sbx", "18b50cb1-f2ca-402a-af0f-6c97b8dfde0e")
+
+    assert dump_yaml(patch({})) == (GOLDEN_DIR / "workspace_stack_created.yaml").read_text()
+
+
+def test_workspace_stack_patch_adds_a_new_environment_to_an_existing_file():
+    from server.yaml_util import load_yaml
+
+    before = load_yaml((GOLDEN_DIR / "workspace_stack_created.yaml").read_text())
+    patch = workspace_stack_patch("controltower", "dev", "ignored-for-existing-file")
+
+    assert dump_yaml(patch(before)) == (GOLDEN_DIR / "workspace_stack_env_added.yaml").read_text()
 
 
 def test_add_business_domain_patch_produces_the_expected_file_diff():

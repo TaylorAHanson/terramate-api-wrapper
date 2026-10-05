@@ -11,7 +11,7 @@ import json
 import os
 from pathlib import Path
 
-from server.recipes.framework import AddFile, EditFile, FileEdit, Playbook
+from server.recipes.framework import AddFile, EditFile, EditText, FileEdit, Playbook
 
 
 def _file_edit_to_dict(edit: FileEdit) -> dict:
@@ -24,6 +24,8 @@ def _file_edit_to_dict(edit: FileEdit) -> dict:
         # assert the "after" content directly, rather than via this generic
         # serializer.
         return {"type": "edit_file", "path": edit.path}
+    if isinstance(edit, EditText):
+        return {"type": "edit_text", "path": edit.path}
     raise TypeError(f"Unknown FileEdit type: {type(edit)!r}")
 
 

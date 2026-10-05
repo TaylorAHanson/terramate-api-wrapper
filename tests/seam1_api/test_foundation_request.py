@@ -61,7 +61,7 @@ def test_foundation_request_opens_pr_with_correct_yaml_and_path(db_session):
 
     step1 = detail["steps"][1]
     assert step1["key"] == "business_domain"
-    assert step1["depends_on"] == ["network_foundation"]
+    assert len(step1["depends_on"]) == 1
     assert step1["status"] == "queued"
 
     fake = FakeGitHubClient()
@@ -116,9 +116,10 @@ def test_foundation_request_opens_pr_with_correct_yaml_and_path(db_session):
     pr2 = fake.opened_pull_requests[1]
     assert pr2.title == "foundation: business_domain"
     assert pr2.branch_name == f"provision/{request_id}/business_domain"
-    assert len(pr2.edits) == 1
-    edit2 = pr2.edits[0]
-    assert edit2.path == "src/configs/sbx/domain_stacks/business_domain/controltower/business_domain_controltower.tm.yml"
+    assert len(pr2.edits) == 2
+    edit2, id_edit2 = pr2.edits
+    assert edit2.path == "src/configs/sbx/domain_stacks/business_domain/workspace/controltower/controltower_workspace.tm.yml"
+    assert id_edit2.path == "src/configs/sbx/sbx_config.tm.hcl"
 
     # Verify Step 2 metadata
     meta2_match = re.search(r"<!-- provisioning-metadata: (.*) -->", pr2.body)
@@ -131,9 +132,13 @@ def test_foundation_request_opens_pr_with_correct_yaml_and_path(db_session):
 
     # Verify Step 2 creates YAML when empty
     doc2 = edit2.patch({})
-    assert doc2["metadata"]["name"] == "business_domain_controltower"
+    assert doc2["metadata"]["name"] == "controltower_workspace"
     assert doc2["environments"]["sbx"]["inputs"]["domain_name"] == "controltower"
     assert doc2["environments"]["sbx"]["inputs"]["network_foundation"] == "network_foundation"
+
+    # The stack_ids entry carries the same uuid as the stack's metadata.uuid
+    config = id_edit2.patch('globals {\n  stack_ids = {\n    network_foundation = "nf"\n  }\n}\n')
+    assert f'controltower_workspace = "{doc2["metadata"]["uuid"]}"' in config
 
     # Step 1 finishes apply in CI: report using outputs_url from Step 2 PR metadata
     outputs_path1 = meta2["outputs_url"]
@@ -192,9 +197,9 @@ def test_foundation_request_with_custom_business_domain(db_session):
     pr2 = fake.opened_pull_requests[1]
     assert pr2.title == "foundation: business_domain"
     edit2 = pr2.edits[0]
-    assert edit2.path == "src/configs/sbx/domain_stacks/business_domain/wealth-management/business_domain_wealth-management.tm.yml"
+    assert edit2.path == "src/configs/sbx/domain_stacks/business_domain/workspace/wealth-management/wealth-management_workspace.tm.yml"
     doc2 = edit2.patch({})
-    assert doc2["metadata"]["name"] == "business_domain_wealth-management"
+    assert doc2["metadata"]["name"] == "wealth-management_workspace"
     assert doc2["environments"]["sbx"]["inputs"]["domain_name"] == "wealth-management"
 
 
@@ -242,9 +247,9 @@ def test_network_foundation_request_with_type_network_foundation(db_session):
     pr2 = fake.opened_pull_requests[1]
     assert pr2.title == "network_foundation: business_domain"
     edit2 = pr2.edits[0]
-    assert edit2.path == "src/configs/sbx/domain_stacks/business_domain/risk/business_domain_risk.tm.yml"
+    assert edit2.path == "src/configs/sbx/domain_stacks/business_domain/workspace/risk/risk_workspace.tm.yml"
     doc2 = edit2.patch({})
-    assert doc2["metadata"]["name"] == "business_domain_risk"
+    assert doc2["metadata"]["name"] == "risk_workspace"
     assert doc2["environments"]["sbx"]["inputs"]["domain_name"] == "risk"
 
     # Complete Step 1

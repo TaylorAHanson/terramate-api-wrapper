@@ -36,11 +36,14 @@ from server.models import ProvisioningRequest, Step
 from server.orchestrator import TERMINAL_REQUEST_STATUSES
 from server.recipes.registry import RECIPES
 from server.recipes.schema import SchemaProvisioningRequest
+from server.recipes.unity_catalog import UnityCatalogProvisioningRequest
+from server.recipes.unity_catalog_schema import UnityCatalogSchemaProvisioningRequest
 from server.recipes.workspace import (
     FoundationProvisioningRequest,
     NetworkFoundationProvisioningRequest,
     WorkspaceProvisioningRequest,
 )
+from server.recipes.workspace_folder import WorkspaceFolderProvisioningRequest
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +55,9 @@ ProvisioningRequestBody = Annotated[
         WorkspaceProvisioningRequest,
         FoundationProvisioningRequest,
         NetworkFoundationProvisioningRequest,
+        WorkspaceFolderProvisioningRequest,
+        UnityCatalogProvisioningRequest,
+        UnityCatalogSchemaProvisioningRequest,
     ],
     Field(discriminator="type"),
 ]

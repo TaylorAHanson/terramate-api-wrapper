@@ -90,6 +90,11 @@ The body is a **discriminated union on `type`** (also published live at
 
 - `schema` — add a schema to an existing catalog.
 - `workspace` (aliased as `foundation` or `network_foundation`) — provision a workspace domain in the Network Foundation stack.
+- `workspace_folder` — create (or add folders to) a domain's workspace folders.
+- `unity_catalog` — create a domain's Unity Catalog catalogs (or add more).
+- `unity_catalog_schema` — create (or add schemas to) one catalog's schemas.
+
+Every Step that creates a new stack also registers `<stack_name> = "<uuid>"` in the `stack_ids` block of `src/configs/{environment}/{environment}_config.tm.hcl`, in the same PR (ADR-0005). The uuid is generated for you; you never pass it.
 
 ### `type: "schema"` — add a schema to an existing catalog
 
@@ -144,9 +149,56 @@ Registers a new business domain (e.g. `finance`) under the Terramate bundle conf
 
 Two Steps (executed sequentially as separate pull requests):
 1. `network_foundation` — opens a PR editing `src/configs/{environment}/core_infrastructure/network_foundation/network_foundation.tm.yml` to append the business domain with its `subnet_size` (defaults to `"small"`).
-2. `business_domain` — depends on `network_foundation`. Once PR 1 is merged and applied, opens a PR creating (or updating if adding an environment) `src/configs/{environment}/domain_stacks/business_domain/{domain}/business_domain_{domain}.tm.yml`.
+2. `business_domain` — depends on `network_foundation`. Once PR 1 is merged and applied, opens a PR creating (or updating if adding an environment) the workspace stack `src/configs/{environment}/domain_stacks/business_domain/workspace/{domain}/{domain}_workspace.tm.yml`, and registering `{domain}_workspace` in `stack_ids`.
 
 Neither step requires apply-derived outputs.
+
+### `type: "workspace_folder"` — a domain's workspace folders
+
+```json
+{ "type": "workspace_folder", "params": { "business_domain": "finance" } }
+```
+
+| Param | Required | Default | Meaning |
+|---|---|---|---|
+| `business_domain` | yes | — | The domain whose workspace gets the folders. |
+| `environment` | no | `"sbx"` | Target environment. |
+| `workspace_name` | no | `"{domain}_ws_{environment}"` | Workspace the folders live in. |
+| `folder_names` | no | the standard set: `{domain}_assets/ai_apps`, `…/ai_ml`, `…/data_aibi`, `…/data_apps`, `…/data_deng`, `{domain}_aibi_genie`, `{domain}_aibi_dashboards` | Folders to create; on an existing stack, any not already listed are appended. |
+
+One Step (`workspace_folder`): creates or appends to `src/configs/{environment}/domain_stacks/business_domain/workspace_folder/{domain}/{domain}_workspace_folder.tm.yml` and registers `{domain}_workspace_folder` in `stack_ids`.
+
+### `type: "unity_catalog"` — a domain's catalogs
+
+```json
+{ "type": "unity_catalog", "params": { "business_domain": "finance", "catalog_suffixes": ["ai"] } }
+```
+
+| Param | Required | Default | Meaning |
+|---|---|---|---|
+| `business_domain` | yes | — | The domain that owns the catalogs. |
+| `environment` | no | `"sbx"` | Target environment. |
+| `workspace_name` | no | `"{domain}_ws_{environment}"` | Workspace the catalogs are bound to. |
+| `catalog_suffixes` | no | `[]` | Extra catalogs. The default catalog `{domain}_{environment}` is always created; each suffix adds `{domain}_{suffix}_{environment}`. On an existing stack, new suffixes are appended. |
+
+One Step (`unity_catalog`): creates or appends to `src/configs/{environment}/domain_stacks/data_domain/unity_catalog/{domain}/{domain}_unity_catalog.tm.yml` and registers `{domain}_unity_catalog` in `stack_ids` (a no-op if the stack already exists).
+
+### `type: "unity_catalog_schema"` — schemas in one catalog
+
+```json
+{ "type": "unity_catalog_schema", "params": { "business_domain": "finance", "catalog_suffix": "ai", "schemas": ["bronze", "silver"] } }
+```
+
+| Param | Required | Default | Meaning |
+|---|---|---|---|
+| `business_domain` | yes | — | The domain that owns the catalog. |
+| `environment` | no | `"sbx"` | Target environment. |
+| `workspace_name` | no | `"{domain}_ws_{environment}"` | Workspace the catalog is bound to. |
+| `catalog_suffix` | no | `null` | Which catalog: omit for the default `{domain}_{environment}`, or the suffix it was created with. |
+| `catalog_name` | no | derived from the above | Full catalog name; overrides `catalog_suffix`. |
+| `schemas` | no | `[]` | Schemas to create; on an existing stack, any not already listed are appended. |
+
+One Step (`unity_catalog_schema`): creates or appends to `src/configs/{environment}/domain_stacks/data_domain/unity_catalog_schema/{domain}/{catalog_name}_unity_catalog_schema.tm.yml` and registers `{catalog_name}_unity_catalog_schema` in `stack_ids` (a no-op if the stack already exists).
 
 ### Responses
 

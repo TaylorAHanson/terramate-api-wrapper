@@ -1,0 +1,20 @@
+{
+  "steps": [
+    {
+      "bundle_edits": [
+        {
+          "path": "src/configs/sbx/domain_stacks/data_domain/unity_catalog/controltower/controltower_unity_catalog.tm.yml",
+          "type": "edit_file"
+        },
+        {
+          "path": "src/configs/sbx/sbx_config.tm.hcl",
+          "type": "edit_text"
+        }
+      ],
+      "consumes": [],
+      "depends_on": [],
+      "key": "unity_catalog",
+      "produces": []
+    }
+  ]
+}

@@ -37,7 +37,22 @@ class EditFile:
     patch: Callable[[dict[str, Any]], dict[str, Any]]
 
 
-FileEdit = AddFile | EditFile
+@dataclass(frozen=True)
+class EditText:
+    """A targeted mutation of an existing non-YAML bundle file's raw text
+    (e.g. registering a stack id in `<env>_config.tm.hcl`, ADR-0005).
+
+    `patch` receives the file's current text ("" if it doesn't exist) and
+    returns the new text. Reserved for files with no structured
+    parse -> serialize path; it must touch only the lines it adds or
+    re-aligns so the PR diff stays reviewable.
+    """
+
+    path: str
+    patch: Callable[[str], str]
+
+
+FileEdit = AddFile | EditFile | EditText
 
 
 @dataclass(frozen=True)

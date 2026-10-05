@@ -1,0 +1,13 @@
+apiVersion: terramate.io/cli/v1
+kind: BundleInstance
+metadata:
+  name: controltower_unity_catalog
+  uuid: "9c3549fc-60a2-4ea8-bc67-12d6cfa854c9"
+spec:
+  source: "/src/bundles/domain_stacks/data_domain/unity_catalog"
+environments:
+  sbx:
+    inputs:
+      domain_name: "controltower"
+      workspace_name: "controltower_ws_sbx"
+      catalog_suffix: []

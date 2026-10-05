@@ -1,0 +1,20 @@
+{
+  "steps": [
+    {
+      "bundle_edits": [
+        {
+          "path": "src/configs/sbx/domain_stacks/business_domain/workspace_folder/controltower/controltower_workspace_folder.tm.yml",
+          "type": "edit_file"
+        },
+        {
+          "path": "src/configs/sbx/sbx_config.tm.hcl",
+          "type": "edit_text"
+        }
+      ],
+      "consumes": [],
+      "depends_on": [],
+      "key": "workspace_folder",
+      "produces": []
+    }
+  ]
+}

@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from server import orchestrator
 from server.models import ProvisioningRequest, Step
-from server.recipes.framework import AddFile, EditFile, OutputRef, Playbook, Recipe, StepSpec
+from server.recipes.framework import AddFile, EditFile, EditText, OutputRef, Playbook, Recipe, StepSpec
 from server.recipes.registry import RECIPES
 from server.recipes.workspace import bind_workspace_patch, set_owner_patch
 
@@ -127,12 +127,26 @@ def test_resolve_edits_is_a_no_op_substitution_for_a_step_with_no_consumes():
     # Step 2: business_domain
     step2 = _step(request, "business_domain", depends_on=["network_foundation"])
     edits2 = orchestrator._resolve_edits(step2, resolved=[])
-    assert len(edits2) == 1
-    assert isinstance(edits2[0], EditFile)
-    assert edits2[0].path == "src/configs/sbx/domain_stacks/business_domain/analytics/business_domain_analytics.tm.yml"
-    doc2 = edits2[0].patch({})
-    assert doc2["metadata"]["name"] == "business_domain_analytics"
+    assert len(edits2) == 2
+    stack_edit, id_edit = edits2
+    assert isinstance(stack_edit, EditFile)
+    assert stack_edit.path == "src/configs/sbx/domain_stacks/business_domain/workspace/analytics/analytics_workspace.tm.yml"
+    doc2 = stack_edit.patch({})
+    assert doc2["metadata"]["name"] == "analytics_workspace"
     assert doc2["environments"]["sbx"]["inputs"]["domain_name"] == "analytics"
+    assert isinstance(id_edit, EditText)
+    assert id_edit.path == "src/configs/sbx/sbx_config.tm.hcl"
+    config = id_edit.patch('  stack_ids = {\n    network_foundation = "nf"\n  }\n')
+    assert 'analytics_workspace = "' in config
+
+
+def test_resolve_edits_substitutes_placeholders_in_text_edits():
+    edit = EditText("cfg.tm.hcl", lambda text: text + 'id = "${steps.create.outputs.workspace_id}"\n')
+
+    substituted = orchestrator._substitute_edit(edit, {"${steps.create.outputs.workspace_id}": "ws-7"})
+
+    assert isinstance(substituted, EditText)
+    assert substituted.patch("") == 'id = "ws-7"\n'
 
 
 def test_resolve_edits_for_schema_recipe_single_step():

@@ -44,7 +44,7 @@ from sqlalchemy.orm import Session
 from server.config import get_settings
 from server.github_client import GitHubClient, correlate
 from server.models import Output, ProvisioningRequest, Step
-from server.recipes.framework import AddFile, EditFile, FileEdit, StepSpec
+from server.recipes.framework import AddFile, EditFile, EditText, FileEdit, StepSpec
 from server.recipes.registry import RECIPES
 
 logger = logging.getLogger(__name__)
@@ -288,6 +288,12 @@ def _substitute_edit(edit: FileEdit, substitutions: dict[str, Any]) -> FileEdit:
         return EditFile(
             edit.path,
             lambda document: _substitute_structure(original_patch(document), substitutions),
+        )
+    if isinstance(edit, EditText):
+        original_text_patch = edit.patch
+        return EditText(
+            edit.path,
+            lambda text: _substitute_text(original_text_patch(text), substitutions),
         )
     raise TypeError(f"Unknown FileEdit type: {type(edit)!r}")
 

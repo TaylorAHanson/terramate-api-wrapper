@@ -15,8 +15,12 @@
     {
       "bundle_edits": [
         {
-          "path": "src/configs/sbx/domain_stacks/business_domain/controltower/business_domain_controltower.tm.yml",
+          "path": "src/configs/sbx/domain_stacks/business_domain/workspace/controltower/controltower_workspace.tm.yml",
           "type": "edit_file"
+        },
+        {
+          "path": "src/configs/sbx/sbx_config.tm.hcl",
+          "type": "edit_text"
         }
       ],
       "consumes": [],

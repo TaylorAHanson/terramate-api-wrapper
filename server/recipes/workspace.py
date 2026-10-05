@@ -1,9 +1,14 @@
-"""The `workspace` Recipe: customer Network Foundation stack step ("first step spec for the
-workspace").
+"""The `workspace` Recipe: a business domain's network foundation entry and its
+workspace stack, as two PRs.
 
-Opens a pull request editing the network foundation Terramate bundle instance file:
-`src/configs/{environment}/core_infrastructure/network_foundation/network_foundation.tm.yml`
-to append the requested business domain(s) with subnet_size under `environments.{environment}.inputs.business_domains`.
+1. `network_foundation` — edits
+   `src/configs/{environment}/core_infrastructure/network_foundation/network_foundation.tm.yml`
+   to append the requested business domain(s) with subnet_size under
+   `environments.{environment}.inputs.business_domains`. The network foundation
+   stack is one per environment and already has its `stack_ids` entry.
+2. `business_domain` — creates (or adds the environment to)
+   `src/configs/{environment}/domain_stacks/business_domain/workspace/{domain}/{domain}_workspace.tm.yml`
+   per domain, and registers `{domain}_workspace` in `stack_ids`.
 """
 from __future__ import annotations
 
@@ -13,10 +18,10 @@ from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from server.recipes.framework import AddFile, EditFile, OutputRef, Playbook, Recipe, StepSpec
-from server.yaml_util import QuotedStr, dump_yaml
-
-_WORKSPACE_ID_PLACEHOLDER = "${steps.create.outputs.workspace_id}"
+from server.recipes import stack_ids
+from server.recipes.bundle_instance import bundle_instance_patch
+from server.recipes.framework import EditFile, Playbook, Recipe, StepSpec
+from server.yaml_util import QuotedStr
 
 
 class WorkspaceParams(BaseModel):
@@ -29,10 +34,22 @@ class WorkspaceParams(BaseModel):
     subnet_size: Literal["small", "medium", "large"] | str = "small"
     uuid: str = Field(default_factory=lambda: str(uuid.uuid4()))
     business_domain_uuid: str | None = None
+    # One workspace-stack uuid per domain, minted at request time and persisted
+    # with `params`, so the stack's `metadata.uuid` and its `stack_ids` entry
+    # agree and stay stable when the Playbook is rebuilt at claim time.
+    stack_uuids: dict[str, str] = Field(default_factory=dict)
     # Optional fields for backwards compatibility with earlier prototypes
     metastore: str | None = None
     domain_owner: str | None = None
     groups: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _mint_stack_uuids(self) -> "WorkspaceParams":
+        if self.business_domain_uuid and len(self.business_domains) == 1:
+            self.stack_uuids.setdefault(self.business_domains[0], self.business_domain_uuid)
+        for domain in self.business_domains:
+            self.stack_uuids.setdefault(domain, str(uuid.uuid4()))
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -203,88 +220,41 @@ def add_business_domain_patch(
     return patch
 
 
-def business_domain_config_path(environment: str = "sbx", domain: str = "controltower") -> str:
-    """The bundle config file for an individual business domain stack."""
-    return f"src/configs/{environment}/domain_stacks/business_domain/{domain}/business_domain_{domain}.tm.yml"
+def workspace_stack_name(domain: str) -> str:
+    return f"{domain}_workspace"
 
 
-def render_business_domain_config(
-    domain: str,
-    environment: str = "sbx",
-    step_uuid: str | None = None,
-    storage_configuration_id: str = "",
-) -> str:
-    """The business domain stack's Terramate bundle instance config file."""
-    patch = add_business_domain_stack_patch(
-        domain=domain,
-        environment=environment,
-        default_uuid=step_uuid or "18b50cb1-f2ca-402a-af0f-6c97b8dfde0e",
-        storage_configuration_id=storage_configuration_id,
+def default_workspace_name(domain: str, environment: str) -> str:
+    """The Databricks workspace name the domain stacks reference, e.g. `controltower_ws_sbx`."""
+    return f"{domain}_ws_{environment}"
+
+
+def workspace_config_path(environment: str, domain: str) -> str:
+    """The bundle config file for a business domain's workspace stack."""
+    return (
+        f"src/configs/{environment}/domain_stacks/business_domain/workspace/{domain}/"
+        f"{workspace_stack_name(domain)}.tm.yml"
     )
-    return dump_yaml(patch({}))
 
 
-def add_business_domain_stack_patch(
+def workspace_stack_patch(
     domain: str,
-    environment: str = "sbx",
-    default_uuid: str | None = None,
-    admin_roles: list[str] | None = None,
-    user_roles: list[str] | None = None,
+    environment: str,
+    stack_uuid: str,
     storage_configuration_id: str = "",
 ) -> Callable[[dict[str, Any]], dict[str, Any]]:
-    """A structured YAML patch that creates or updates a business domain stack configuration.
-
-    If the document is empty, creates the full BundleInstance.
-    If the document exists, appends or updates the requested environment under `environments`.
-    """
-
-    def patch(document: dict[str, Any]) -> dict[str, Any]:
-        doc = copy.deepcopy(document)
-        if not doc:
-            doc = {
-                "apiVersion": "terramate.io/cli/v1",
-                "kind": "BundleInstance",
-                "metadata": {
-                    "name": f"business_domain_{domain}",
-                    "uuid": QuotedStr(default_uuid or str(uuid.uuid4())),
-                },
-                "spec": {
-                    "source": QuotedStr("/src/bundles/domain_stacks/business_domain"),
-                },
-                "environments": {},
-            }
-
-        # Clean up any misplaced spec.environments and merge into top-level environments
-        spec = doc.setdefault("spec", {})
-        misplaced_envs = spec.pop("environments", None)
-        envs = doc.setdefault("environments", {})
-        if misplaced_envs and isinstance(misplaced_envs, dict):
-            for env_name, env_val in misplaced_envs.items():
-                target_env = envs.setdefault(env_name, {})
-                if isinstance(env_val, dict):
-                    target_inputs = target_env.setdefault("inputs", {})
-                    src_inputs = env_val.get("inputs", {})
-                    if isinstance(src_inputs, dict):
-                        for k, v in src_inputs.items():
-                            target_inputs.setdefault(k, v)
-
-        env_config = envs.setdefault(environment, {})
-        inputs = env_config.setdefault("inputs", {})
-
-        inputs.setdefault("network_foundation", QuotedStr("network_foundation"))
-        inputs.setdefault("domain_name", QuotedStr(domain))
-        inputs.setdefault(
-            "domain_role_permissions",
-            {
-                "admin": list(admin_roles) if admin_roles is not None else [],
-                "user": list(user_roles) if user_roles is not None else [],
-            },
-        )
-        inputs.setdefault("storage_configuration_id", QuotedStr(storage_configuration_id))
-
-        return doc
-
-    return patch
+    """Creates the workspace stack file, or adds `environment` to an existing one."""
+    return bundle_instance_patch(
+        name=workspace_stack_name(domain),
+        stack_uuid=stack_uuid,
+        source="/src/bundles/domain_stacks/business_domain/workspace",
+        environment=environment,
+        inputs={
+            "network_foundation": "network_foundation",
+            "domain_name": domain,
+            "storage_configuration_id": storage_configuration_id,
+        },
+    )
 
 
 class WorkspaceRecipe(Recipe):
@@ -292,19 +262,18 @@ class WorkspaceRecipe(Recipe):
     params_model = WorkspaceParams
 
     def build(self, params: WorkspaceParams) -> Playbook:
-        domain_edits = [
-            EditFile(
-                business_domain_config_path(params.environment, d),
-                add_business_domain_stack_patch(
-                    domain=d,
-                    environment=params.environment,
-                    default_uuid=params.business_domain_uuid if len(params.business_domains) == 1 else None,
-                    admin_roles=params.groups,
-                    user_roles=[],
+        workspace_edits = []
+        for domain in params.business_domains:
+            stack_uuid = params.stack_uuids[domain]
+            workspace_edits += [
+                EditFile(
+                    workspace_config_path(params.environment, domain),
+                    workspace_stack_patch(domain, params.environment, stack_uuid),
                 ),
-            )
-            for d in params.business_domains
-        ]
+                stack_ids.register_stack_id(
+                    params.environment, stack_ids.WORKSPACE, workspace_stack_name(domain), stack_uuid
+                ),
+            ]
         return Playbook(
             steps=[
                 StepSpec(
@@ -324,7 +293,7 @@ class WorkspaceRecipe(Recipe):
                 StepSpec(
                     key="business_domain",
                     depends_on=["network_foundation"],
-                    bundle_edits=domain_edits,
+                    bundle_edits=workspace_edits,
                 ),
             ]
         )

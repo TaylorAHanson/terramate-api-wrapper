@@ -53,6 +53,9 @@ read `docs/adr/` — currently:
 - `docs/adr/0002-output-capture-via-direct-lakebase-write.md` — why Step
   Outputs are written to Lakebase directly by the GitHub Action, not polled
   or pushed to an API endpoint.
+- `docs/adr/0005-stack-id-registration-via-targeted-text-edit.md` — why a
+  new stack's id is added to `<env>_config.tm.hcl` with a targeted text edit
+  (`EditText`) rather than parse → serialize.
 
 `architecture.md` at the repo root has the original, fuller design proposal
 if you need more depth than the ADRs and glossary provide; where it and
@@ -200,7 +203,16 @@ This is the main extension point. To add Type `foo`:
      for `StepSpec`, `AddFile`, `EditFile`, `OutputRef`). Bundle edits are
      always parse → mutate → serialize (`EditFile.patch` takes and returns a
      parsed YAML dict) — never raw text munging — so the resulting PR diff
-     stays reviewable.
+     stays reviewable. The one exception is `EditText`, for files with no
+     structured serializer (ADR-0005).
+   - **If the Type creates a Terramate stack**, model it on
+     `server/recipes/workspace_folder.py`: build the stack file with
+     `bundle_instance_patch` (`server/recipes/bundle_instance.py`), mint its
+     uuid as a `params` field with a `default_factory` (so it's persisted and
+     stable across rebuilds), and add
+     `stack_ids.register_stack_id(env, <group>, <stack_name>, <uuid>)` to the
+     same Step so the stack's id lands in `<env>_config.tm.hcl`
+     (`server/recipes/stack_ids.py`).
 2. **Register it.** Add an entry to `RECIPES` in
    `server/recipes/registry.py`:
    ```python

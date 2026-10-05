@@ -31,7 +31,7 @@ from typing import Any, Iterator, Protocol, Sequence
 import httpx
 import yaml
 
-from server.recipes.framework import AddFile, EditFile, FileEdit
+from server.recipes.framework import AddFile, EditFile, EditText, FileEdit
 from server.yaml_util import dump_yaml, load_yaml
 
 logger = logging.getLogger(__name__)
@@ -184,17 +184,18 @@ class RealGitHubClient:
         if isinstance(edit, AddFile):
             return edit.content
         if isinstance(edit, EditFile):
-            document = self._get_yaml_file(edit.path, ref=base_branch)
+            document = load_yaml(self._get_text_file(edit.path, ref=base_branch))
             return dump_yaml(edit.patch(document))
+        if isinstance(edit, EditText):
+            return edit.patch(self._get_text_file(edit.path, ref=base_branch))
         raise TypeError(f"Unknown FileEdit type: {type(edit)!r}")
 
-    def _get_yaml_file(self, path: str, *, ref: str) -> dict:
+    def _get_text_file(self, path: str, *, ref: str) -> str:
         response = self._client.get(f"/repos/{self.repo}/contents/{path}", params={"ref": ref})
         if response.status_code == 404:
-            return {}
+            return ""
         _raise_for_status(response)
-        content = base64.b64decode(response.json()["content"]).decode("utf-8")
-        return load_yaml(content)
+        return base64.b64decode(response.json()["content"]).decode("utf-8")
 
     def _create_blob(self, content: str) -> str:
         return self._post(f"/repos/{self.repo}/git/blobs", {"content": content, "encoding": "utf-8"})["sha"]
