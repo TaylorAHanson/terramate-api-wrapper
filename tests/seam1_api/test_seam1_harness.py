@@ -28,6 +28,7 @@ def test_version_endpoint_reports_build_info():
     body = response.json()
     assert body["version"]
     assert "git_sha" in body
+    assert "build_time" in body
 
 
 def test_tick_is_callable_against_a_real_test_lakebase(db_session):
