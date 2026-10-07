@@ -56,6 +56,9 @@ read `docs/adr/` — currently:
 - `docs/adr/0005-stack-id-registration-via-targeted-text-edit.md` — why a
   new stack's id is added to `<env>_config.tm.hcl` with a targeted text edit
   (`EditText`) rather than parse → serialize.
+- `docs/adr/0006-serial-lane-for-non-parallel-recipes.md` — why non-parallel
+  Types (`Recipe.parallel = False`, the default) share one FIFO lane with at
+  most one open PR at a time.
 
 `architecture.md` at the repo root has the original, fuller design proposal
 if you need more depth than the ADRs and glossary provide; where it and
@@ -205,6 +208,9 @@ This is the main extension point. To add Type `foo`:
      parsed YAML dict) — never raw text munging — so the resulting PR diff
      stays reviewable. The one exception is `EditText`, for files with no
      structured serializer (ADR-0005).
+   - Leave `parallel` at its default `False` (one open PR at a time across
+     all serial Types, FIFO — ADR-0006) unless the Type's PRs only ever touch
+     files no other Type edits; only then set `parallel = True`.
    - **If the Type creates a Terramate stack**, model it on
      `server/recipes/workspace_folder.py`: build the stack file with
      `bundle_instance_patch` (`server/recipes/bundle_instance.py`), mint its

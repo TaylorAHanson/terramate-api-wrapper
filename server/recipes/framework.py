@@ -92,6 +92,13 @@ class Recipe(ABC):
     # claim time, to get real bundle_edits content, without every call site
     # needing to know each type's concrete params class.
     params_model: type[BaseModel]
+    # False puts the Type in the serial lane: across *all* non-parallel Types,
+    # at most one Step PR is open at a time, and requests are served FIFO by
+    # creation time. Types whose PRs touch shared files (e.g. the
+    # `<env>_config.tm.hcl` stack ids, ADR-0005) must stay serial, or
+    # concurrent PRs conflict on merge. True lets a Type's PRs open
+    # alongside anything else.
+    parallel: bool = False
 
     @abstractmethod
     def build(self, params: Any) -> Playbook: ...

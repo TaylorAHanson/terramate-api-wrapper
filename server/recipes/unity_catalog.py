@@ -71,6 +71,7 @@ def unity_catalog_patch(params: UnityCatalogParams) -> Callable[[dict[str, Any]]
 class UnityCatalogRecipe(Recipe):
     type = "unity_catalog"
     params_model = UnityCatalogParams
+    parallel = False
 
     def build(self, params: UnityCatalogParams) -> Playbook:
         return Playbook(

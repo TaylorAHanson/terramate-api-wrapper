@@ -43,6 +43,7 @@ YAML `metadata.uuid` and the `stack_ids` value are the same and stable across Pl
   serial, so they never collide, but **two concurrent requests in the same environment will
   conflict on merge** (both append to the same group). The second PR must be rebased or
   re-opened. Revisit if concurrent requests per environment become common (e.g. a per-stack
-  generated file the config `tm_merge`s, owned by the terramate repo).
+  generated file the config `tm_merge`s, owned by the terramate repo). *Resolved by ADR-0006:
+  stack-creating Types are serial, so only one of these PRs is open at a time.*
 - Text edits are reviewed by eye like any other diff; the unit tests in `tests/unit/test_stack_ids.py`
   pin the exact added/re-aligned lines.

@@ -57,6 +57,7 @@ def add_schema_patch(
 class SchemaRecipe(Recipe):
     type = "schema"
     params_model = SchemaParams
+    parallel = True
 
     def build(self, params: SchemaParams) -> Playbook:
         catalog_file = locate_catalog(params.catalog)

@@ -14,7 +14,9 @@ to:
 
     queued -> submitted -> { done | failed | rejected }
 
-- **queued** — dependencies not yet `done`, or intake gated; no PR yet.
+- **queued** — dependencies not yet `done`, waiting its FIFO turn in the
+  serial lane (`Recipe.parallel = False`: one open PR at a time across all
+  serial Types), or intake gated; no PR yet.
 - **submitted** — the API opened the Step's PR and is waiting for CI's terminal
   push (this replaces the old `pr_open` + `awaiting_approval` + `applying`
   states, and with them the plan/merge polling passes).
@@ -38,7 +40,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Sequence
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from server.config import get_settings
@@ -59,6 +61,10 @@ _FAILED_STEP_STATUSES = {"failed", "rejected"}
 # claimed or advanced further, even a queued Step with no dependency relation
 # to whatever halted the request (#21).
 TERMINAL_REQUEST_STATUSES = {"succeeded", "failed", "cancelled"}
+
+# Arbitrary, but constant across instances and distinct from
+# server.migrate's migration lock key.
+_SERIAL_LANE_ADVISORY_LOCK_KEY = 0x7E5A_0002
 
 
 def _transition(step: Step, to_status: str) -> None:
@@ -113,20 +119,34 @@ def _claim_and_open_next(session: Session, github_client: GitHubClient) -> bool:
     """
     queued_steps = session.scalars(
         select(Step)
+        .join(Step.request)
         .where(Step.status == "queued")
-        .order_by(Step.ordinal)
-        .with_for_update(skip_locked=True)
+        .order_by(ProvisioningRequest.created_at, ProvisioningRequest.id, Step.ordinal)
+        .with_for_update(of=Step, skip_locked=True)
     ).all()
 
-    step = next(
-        (
-            s
-            for s in queued_steps
-            if s.request.status not in TERMINAL_REQUEST_STATUSES and _dependencies_done(session, s)
-        ),
-        None,
-    )
+    step = None
+    serial_lane_busy: bool | None = None
+    for candidate in queued_steps:
+        if candidate.request.status in TERMINAL_REQUEST_STATUSES or not _dependencies_done(session, candidate):
+            continue
+        if RECIPES[candidate.request.type].parallel:
+            step = candidate
+            break
+        if serial_lane_busy is None:
+            serial_lane_busy = _serial_lane_busy(session)
+        if not serial_lane_busy:
+            step = candidate
+            break
+        logger.debug(
+            "step_waiting_for_serial_lane request_id=%s step=%s ordinal=%s",
+            candidate.request_id,
+            candidate.key,
+            candidate.ordinal,
+        )
     if step is None:
+        if serial_lane_busy is not None:
+            session.commit()  # releases the serial-lane advisory lock
         return False
 
     step.claimed_at = datetime.now(timezone.utc)
@@ -210,6 +230,30 @@ def _claim_and_open_next(session: Session, github_client: GitHubClient) -> bool:
     _roll_up_request(session, step.request_id)
     session.commit()
     return True
+
+
+def _serial_lane_busy(session: Session) -> bool:
+    """Whether a non-parallel Type (`Recipe.parallel = False`) already has a
+    Step PR open — i.e. a `submitted` Step of a still-live request.
+
+    Takes a transaction-scoped advisory lock first, so two replicas can't each
+    see the lane free and both open a serial PR; it's released when this
+    claim's transaction commits or rolls back. A submitted Step under a halted
+    request never advances (#21), so it doesn't hold the lane.
+    """
+    session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _SERIAL_LANE_ADVISORY_LOCK_KEY})
+    serial_types = [t for t, recipe in RECIPES.items() if not recipe.parallel]
+    open_serial_step = session.scalars(
+        select(Step.id)
+        .join(Step.request)
+        .where(
+            Step.status == "submitted",
+            ProvisioningRequest.type.in_(serial_types),
+            ProvisioningRequest.status.not_in(TERMINAL_REQUEST_STATUSES),
+        )
+        .limit(1)
+    ).first()
+    return open_serial_step is not None
 
 
 def _dependencies_done(session: Session, step: Step) -> bool:

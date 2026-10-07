@@ -77,6 +77,7 @@ def workspace_folder_patch(params: WorkspaceFolderParams) -> Callable[[dict[str,
 class WorkspaceFolderRecipe(Recipe):
     type = "workspace_folder"
     params_model = WorkspaceFolderParams
+    parallel = False
 
     def build(self, params: WorkspaceFolderParams) -> Playbook:
         return Playbook(

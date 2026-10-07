@@ -260,6 +260,7 @@ def workspace_stack_patch(
 class WorkspaceRecipe(Recipe):
     type = "workspace"
     params_model = WorkspaceParams
+    parallel = False
 
     def build(self, params: WorkspaceParams) -> Playbook:
         workspace_edits = []
@@ -302,6 +303,7 @@ class WorkspaceRecipe(Recipe):
 class FoundationRecipe(Recipe):
     type = "foundation"
     params_model = WorkspaceParams
+    parallel = False
 
     def build(self, params: WorkspaceParams) -> Playbook:
         return WorkspaceRecipe().build(params)
@@ -310,6 +312,7 @@ class FoundationRecipe(Recipe):
 class NetworkFoundationRecipe(Recipe):
     type = "network_foundation"
     params_model = WorkspaceParams
+    parallel = False
 
     def build(self, params: WorkspaceParams) -> Playbook:
         return WorkspaceRecipe().build(params)

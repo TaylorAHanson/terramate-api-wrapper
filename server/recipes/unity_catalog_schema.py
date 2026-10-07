@@ -75,6 +75,7 @@ def unity_catalog_schema_patch(params: UnityCatalogSchemaParams) -> Callable[[di
 class UnityCatalogSchemaRecipe(Recipe):
     type = "unity_catalog_schema"
     params_model = UnityCatalogSchemaParams
+    parallel = False
 
     def build(self, params: UnityCatalogSchemaParams) -> Playbook:
         return Playbook(

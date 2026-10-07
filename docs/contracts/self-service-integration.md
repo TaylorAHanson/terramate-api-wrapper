@@ -302,7 +302,7 @@ Each Step's `status`:
 
 | Step `status` | Meaning |
 |---|---|
-| `queued` | Dependencies not yet `done`, or intake gated; no PR yet. |
+| `queued` | Dependencies not yet `done`, waiting its turn behind another request's open PR (see below), or intake gated; no PR yet. |
 | `submitted` | **PR is open — a human must review the plan and merge (approve) or close (reject) it on GitHub.** |
 | `done` | Applied successfully. |
 | `failed` | Applied and failed. |
@@ -313,6 +313,12 @@ Each Step's `status`:
   approve (or reject)."* There is **no approve-via-API** call — approval is the
   GitHub merge. `pr_url`/`pr_number` are `null` only before the PR opens
   (`queued`).
+- **Requests take turns.** `workspace`, `workspace_folder`, `unity_catalog`
+  and `unity_catalog_schema` share one queue: across all of them, only one PR
+  is open at a time, and requests are served in the order they were created.
+  A request can sit at `queued` with no PR while an earlier request's PR
+  waits for review. Surface that as "waiting behind earlier requests", not an
+  error. (`schema` doesn't queue.)
 - **`stuck: true`** means the Step has sat at `submitted` past the API's
   threshold — CI's terminal push never arrived. Surface it as "waiting longer
   than expected; may need operator attention."
