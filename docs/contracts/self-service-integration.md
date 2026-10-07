@@ -86,15 +86,51 @@ replay is resolved **before** the intake gate is checked (a replay of an
 already-accepted request succeeds even if intake later closed).
 
 The body is a **discriminated union on `type`** (also published live at
-`/openapi.json`). Two primary types exist today:
+`/openapi.json`):
 
-- `schema` — add a schema to an existing catalog.
-- `workspace` (aliased as `foundation` or `network_foundation`) — provision a workspace domain in the Network Foundation stack.
-- `workspace_folder` — create (or add folders to) a domain's workspace folders.
-- `unity_catalog` — create a domain's Unity Catalog catalogs (or add more).
-- `unity_catalog_schema` — create (or add schemas to) one catalog's schemas.
+```json
+{ "type": "<type>", "params": { ... } }
+```
 
-Every Step that creates a new stack also registers `<stack_name> = "<uuid>"` in the `stack_ids` block of `src/configs/{environment}/{environment}_config.tm.hcl`, in the same PR (ADR-0005). The uuid is generated for you; you never pass it.
+### Request types at a glance
+
+| `type` | Required params | What it provisions | PRs |
+|---|---|---|---|
+| `workspace` (aliases `foundation`, `network_foundation`) | none (`business_domain` defaults to `"controltower"`, so always send it) | A business domain's network foundation entry, then its workspace stack | 2, sequential |
+| `workspace_folder` | `business_domain` | The domain's workspace folders | 1 |
+| `unity_catalog` | `business_domain` | The domain's Unity Catalog catalogs | 1 |
+| `unity_catalog_schema` | `business_domain` | Schemas in one of the domain's catalogs | 1 |
+| `schema` | `catalog`, `name`, `owner` | Legacy prototype type (fixture repo layout); not for the domain stacks above | 1 |
+
+Every optional param has a default (tables below); `environment` defaults to
+`"sbx"` everywhere. Every Step that creates a new stack also registers
+`<stack_name> = "<uuid>"` in the `stack_ids` block of
+`src/configs/{environment}/{environment}_config.tm.hcl`, in the same PR
+(ADR-0005).
+
+### Building self-service tools from these types
+
+- **Order across tools.** Each type is an independent request; the API does
+  not enforce ordering *between* requests. Run them in dependency order, and
+  wait for each request to reach `succeeded` before submitting the next:
+  1. `workspace`
+  2. `workspace_folder` and `unity_catalog` (either order, both need the workspace)
+  3. `unity_catalog_schema` (needs its catalog from `unity_catalog`)
+- **Never send uuids.** `uuid`, `stack_uuid`, `stack_uuids`, and
+  `business_domain_uuid` are generated and persisted by the API; leave them
+  out of tool schemas.
+- **`unity_catalog_schema`: pick the catalog one way.** Send `catalog_suffix`
+  (the suffix it was created with) *or* `catalog_name` (the full name), not
+  both; omit both for the domain's default catalog. Treat `schemas` as
+  required in your tool — the API accepts an empty list, but then the PR only
+  creates an empty schema stack.
+- **Re-running is additive.** Submitting `workspace_folder`, `unity_catalog`,
+  or `unity_catalog_schema` again for an existing stack only appends folders /
+  suffixes / schemas that aren't already listed; it never removes or renames.
+- **Names are derived, not passed.** `workspace_name` defaults to
+  `{domain}_ws_{environment}`; catalogs are `{domain}_{environment}` and
+  `{domain}_{suffix}_{environment}`. Override `workspace_name` only if the
+  domain's workspace was named differently.
 
 ### `type: "schema"` — add a schema to an existing catalog
 
@@ -129,7 +165,6 @@ Registers a new business domain (e.g. `finance`) under the Terramate bundle conf
   "params": {
     "business_domain": "finance",
     "subnet_size": "small",
-    "name": "finance",
     "environment": "sbx"
   }
 }
@@ -137,15 +172,15 @@ Registers a new business domain (e.g. `finance`) under the Terramate bundle conf
 
 | Param | Required | Default | Meaning |
 |---|---|---|---|
-| `business_domain` | no | `"controltower"` | Business domain to add to `inputs.business_domains`. |
+| `business_domain` | no, but always send it | `"controltower"` | Business domain to add to `inputs.business_domains`. |
 | `subnet_size` | no | `"small"` | Subnet size allocation: `"small"`, `"medium"`, or `"large"`. |
-| `name` | no | `business_domain` | Identifier/name for the workspace request. |
 | `environment` | no | `"sbx"` | Target environment key in the bundle configuration. |
-| `business_domains` | no | `["controltower"]` | List of business domains (automatically kept in sync with `business_domain`). |
-| `uuid` | no | *(auto UUIDv4)* | Unique ID in the bundle metadata. |
-| `metastore` | no | `null` | Optional / legacy parameter (ignored during foundation step). |
-| `domain_owner` | no | `null` | Optional / legacy parameter (ignored during foundation step). |
-| `groups` | no | `[]` | Optional / legacy parameter (ignored during foundation step). |
+| `business_domains` | no | `[business_domain]` | Several domains in one request, instead of `business_domain`. |
+| `name` | no | `business_domain` | Display label for the request; not written to the repo. |
+
+Legacy/ignored params, accepted for backward compatibility only — leave them
+out of tool schemas: `metastore`, `domain_owner`, `groups`, `uuid`,
+`business_domain_uuid`, `stack_uuids`.
 
 Two Steps (executed sequentially as separate pull requests):
 1. `network_foundation` — opens a PR editing `src/configs/{environment}/core_infrastructure/network_foundation/network_foundation.tm.yml` to append the business domain with its `subnet_size` (defaults to `"small"`).
@@ -195,8 +230,8 @@ One Step (`unity_catalog`): creates or appends to `src/configs/{environment}/dom
 | `environment` | no | `"sbx"` | Target environment. |
 | `workspace_name` | no | `"{domain}_ws_{environment}"` | Workspace the catalog is bound to. |
 | `catalog_suffix` | no | `null` | Which catalog: omit for the default `{domain}_{environment}`, or the suffix it was created with. |
-| `catalog_name` | no | derived from the above | Full catalog name; overrides `catalog_suffix`. |
-| `schemas` | no | `[]` | Schemas to create; on an existing stack, any not already listed are appended. |
+| `catalog_name` | no | derived from the above | Full catalog name; overrides `catalog_suffix`. Send one or the other, not both. |
+| `schemas` | no (treat as required in your tool) | `[]` | Schemas to create; on an existing stack, any not already listed are appended. |
 
 One Step (`unity_catalog_schema`): creates or appends to `src/configs/{environment}/domain_stacks/data_domain/unity_catalog_schema/{domain}/{catalog_name}_unity_catalog_schema.tm.yml` and registers `{catalog_name}_unity_catalog_schema` in `stack_ids` (a no-op if the stack already exists).
 
@@ -206,7 +241,7 @@ One Step (`unity_catalog_schema`): creates or appends to `src/configs/{environme
 |---|---|---|
 | `202` | `{ "request_id": "<uuid>", "status": "pending" }` | Persist `request_id`; start polling. |
 | `401` | `{ "detail": "No resolvable caller identity" }` | Your token didn't resolve to a forwarded identity. Fix auth. **Permanent.** |
-| `422` | validation error | Missing `Idempotency-Key`, unknown `type`, or bad `params`. **Permanent** — do not retry unchanged. |
+| `422` | validation error | Missing `Idempotency-Key`, unknown `type`, or bad `params` (e.g. no `business_domain` on `workspace_folder` / `unity_catalog` / `unity_catalog_schema`). **Permanent** — do not retry unchanged. |
 | `503` | `{ "detail": "Intake is currently disabled" }` | The global intake gate is closed. **Permanent** for this attempt — surface to the user; a retry only succeeds after an operator reopens intake. |
 
 ---
@@ -221,7 +256,7 @@ Returns the full request with its Steps:
 
 ```json
 {
-  "id": "…", "type": "workspace", "params": { "business_domain": "finance", "subnet_size": "small", "name": "finance" },
+  "id": "…", "type": "workspace", "params": { "business_domain": "finance", "subnet_size": "small", "name": "finance", "…": "…" },
   "version": "v1", "requester": "…",
   "status": "in_progress",
   "created_at": "…", "updated_at": "…",
@@ -234,13 +269,16 @@ Returns the full request with its Steps:
     {
       "ordinal": 1, "key": "business_domain", "status": "queued",
       "pr_number": null, "pr_url": null,
-      "depends_on": ["network_foundation"], "stuck": false, "status_changed_at": "…"
+      "depends_on": ["<step id>"], "stuck": false, "status_changed_at": "…"
     }
   ]
 }
 ```
 
-`404` if `request_id` is unknown.
+`404` if `request_id` is unknown. `params` echoes what you sent plus the
+defaults and generated uuids the API filled in. `depends_on` holds internal
+Step ids, not Step keys — use `ordinal`/`key` to identify Steps, and don't
+key logic on `depends_on`.
 
 ### The single indicator you need: `status` at the request level
 

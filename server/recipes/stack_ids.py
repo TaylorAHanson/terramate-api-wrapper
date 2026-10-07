@@ -1,11 +1,13 @@
 """Registering a new stack's id in the environment config (ADR-0005).
 
-Every stack a Recipe creates needs a `<key> = "<uuid>"` entry in the
-`stack_ids = { ... }` block of `src/configs/<env>/<env>_config.tm.hcl`; the
-terramate repo uses it as the prefix for that stack's state files. Entries are
-grouped under a `# <family>/<unit> stacks: "<naming>"` comment, e.g.:
+Every stack a Recipe creates needs a `<key> = "<uuid>"` entry in the stack ids
+block of `src/configs/<env>/<env>_config.tm.hcl`; the terramate repo uses it as
+the prefix for that stack's state files. The block is either a labeled globals
+block (`globals "stack_ids" "<env>" { ... }`) or a `stack_ids = { ... }`
+attribute. Entries are grouped under a `# <family>/<unit> stacks: "<naming>"`
+comment, e.g.:
 
-    stack_ids = {
+    globals "stack_ids" "sbx" {
       network_foundation = "ba74849b-..."
       # business_domain/workspace stacks: "<domain_name>_workspace"
       controltower_workspace = "3f23efb8-..."
@@ -24,7 +26,9 @@ from typing import Callable
 
 from server.recipes.framework import EditText
 
-_BLOCK_START = re.compile(r"^(?P<indent>\s*)stack_ids\s*=\s*\{\s*$")
+_BLOCK_START = re.compile(
+    r'^(?P<indent>\s*)(?:globals\s+"stack_ids"(?:\s+"[^"]*")*|stack_ids\s*=)\s*\{\s*$'
+)
 _ATTRIBUTE = re.compile(r"^(?P<indent>\s*)(?P<key>[A-Za-z0-9_\-]+)\s*=\s*(?P<value>.*)$")
 _QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"')
 
@@ -90,17 +94,19 @@ def register_stack_id_patch(group: StackGroup, key: str, stack_uuid: str) -> Cal
 
 
 def _find_block(lines: list[str]) -> tuple[int, int]:
-    """(index of the `stack_ids = {` line, index of its closing `}` line)."""
+    """(index of the stack ids block's opening line, index of its closing `}` line)."""
     start = next((i for i, line in enumerate(lines) if _BLOCK_START.match(line)), None)
     if start is None:
-        raise ValueError("no `stack_ids = {` block found in the environment config")
+        raise ValueError(
+            'no `globals "stack_ids" "<env>" {` or `stack_ids = {` block found in the environment config'
+        )
     depth = 0
     for i in range(start, len(lines)):
         unquoted = _QUOTED.sub("", lines[i].split("#", 1)[0])
         depth += unquoted.count("{") - unquoted.count("}")
         if depth == 0:
             return start, i
-    raise ValueError("unterminated `stack_ids = {` block in the environment config")
+    raise ValueError("unterminated stack ids block in the environment config")
 
 
 def _attribute_key(line: str) -> str | None:

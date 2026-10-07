@@ -95,6 +95,46 @@ def test_workspace_group_does_not_match_the_workspace_folder_group():
     ]
 
 
+LABELED_GLOBALS = (
+    'globals "aws_backend" {\n'
+    '  region = "${global.aws.region}"\n'
+    "}\n"
+    "\n"
+    "# The keys here MUST match terramate.stack.name, e.g. {\n"
+    'globals "stack_ids" "sbx" {\n'
+    '  network_foundation = "ba74849b-ff01-4701-a1f0-8156f21718de"\n'
+    '  # business_domain/workspace stacks: "<domain_name>_workspace"\n'
+    '  controltower_workspace = "3f23efb8-da83-478a-bdb3-23d6b78b38a3"\n'
+    '  # business_domain/workspace_folder stacks: "<domain_name>_workspace_folder"\n'
+    '  controltower_workspace_folder = "7345ad70-d74e-415c-b4f7-2864dd9c656a"\n'
+    "}\n"
+)
+
+
+def test_a_labeled_globals_stack_ids_block_is_edited_in_place():
+    after = stack_ids.register_stack_id_patch(stack_ids.WORKSPACE, "justtesting_workspace", "u-5")(LABELED_GLOBALS)
+
+    removed, added = _changed_lines(LABELED_GLOBALS, after)
+    assert removed == []
+    assert added == ['  justtesting_workspace  = "u-5"']
+    lines = after.splitlines()
+    assert lines[lines.index('  controltower_workspace = "3f23efb8-da83-478a-bdb3-23d6b78b38a3"') + 1] == (
+        '  justtesting_workspace  = "u-5"'
+    )
+
+
+def test_a_missing_group_is_added_to_the_end_of_a_labeled_globals_block():
+    after = stack_ids.register_stack_id_patch(stack_ids.UNITY_CATALOG, "justtesting_unity_catalog", "u-6")(
+        LABELED_GLOBALS
+    )
+
+    assert after.splitlines()[-3:] == [
+        '  # data_domain/unity_catalog stacks: "<domain_name>_unity_catalog"',
+        '  justtesting_unity_catalog = "u-6"',
+        "}",
+    ]
+
+
 def test_a_config_without_a_stack_ids_block_is_rejected():
     patch = stack_ids.register_stack_id_patch(stack_ids.WORKSPACE, "finance_workspace", "u-4")
 

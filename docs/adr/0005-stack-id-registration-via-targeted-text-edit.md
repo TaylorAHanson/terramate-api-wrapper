@@ -6,7 +6,7 @@
 
 ## Context
 
-Every stack the terramate repo deploys needs an entry in the `stack_ids = { ... }` block of
+Every stack the terramate repo deploys needs an entry in the stack ids block (`globals "stack_ids" "<env>" { ... }`, or a `stack_ids = { ... }` attribute) of
 `src/configs/<env>/<env>_config.tm.hcl`; the repo uses it as the prefix for that stack's state
 files. So every Recipe that creates a stack (workspace, workspace_folder, unity_catalog,
 unity_catalog_schema, and whatever comes next) must also add `<stack_name> = "<uuid>"` there, in

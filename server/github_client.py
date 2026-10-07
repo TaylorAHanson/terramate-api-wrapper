@@ -187,7 +187,10 @@ class RealGitHubClient:
             document = load_yaml(self._get_text_file(edit.path, ref=base_branch))
             return dump_yaml(edit.patch(document))
         if isinstance(edit, EditText):
-            return edit.patch(self._get_text_file(edit.path, ref=base_branch))
+            try:
+                return edit.patch(self._get_text_file(edit.path, ref=base_branch))
+            except ValueError as error:
+                raise ValueError(f"{edit.path} on {base_branch}: {error}") from error
         raise TypeError(f"Unknown FileEdit type: {type(edit)!r}")
 
     def _get_text_file(self, path: str, *, ref: str) -> str:
