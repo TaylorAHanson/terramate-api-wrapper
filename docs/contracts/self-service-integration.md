@@ -66,6 +66,10 @@ it, you don't drive it.
   `ADMIN_PRINCIPALS`. Do **not** pre-check the gate before submitting; you'll get
   `403` unless your principal is an admin. Instead, just submit and treat a `503`
   on `POST /v1/requests` as "intake closed" (see below).
+- **`POST /v1/admin/requests/cancel-all`** — operator-only, gated on
+  `ADMIN_PRINCIPALS`. Cancels every request that hasn't finished, everyone's,
+  not just yours. To your users, those requests simply show `status:
+  "cancelled"`.
 
 ---
 

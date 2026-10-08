@@ -176,6 +176,52 @@ def test_cancel_an_unknown_request_is_404():
     assert response.status_code == 404
 
 
+# --- Cancel all -------------------------------------------------------------
+
+
+def test_cancel_all_cancels_every_live_request_and_lists_their_open_prs(db_session):
+    in_flight = _create_schema_request("all-in-flight")
+    succeeded = _create_schema_request("all-succeeded")
+    orchestrator.tick(db_session, FakeGitHubClient())
+    _report(succeeded, 0, status="done")
+    assert _get_request(succeeded)["status"] == "succeeded"
+    pending = _create_schema_request("all-pending")
+
+    response = client.post("/v1/admin/requests/cancel-all", headers=_ADMIN_HEADERS)
+
+    assert response.status_code == 200
+    cancelled = {c["request_id"]: c for c in response.json()["cancelled"]}
+    assert set(cancelled) == {in_flight, pending}
+    assert cancelled[in_flight]["open_pr_urls"] == [_get_request(in_flight)["steps"][0]["pr_url"]]
+    assert cancelled[pending]["open_pr_urls"] == []
+    assert cancelled[in_flight]["type"] == "schema"
+    for request_id in (in_flight, pending):
+        assert _get_request(request_id)["status"] == "cancelled"
+    assert _get_request(succeeded)["status"] == "succeeded"
+
+    assert _report(in_flight, 0, status="done").status_code == 200
+    assert _get_request(in_flight)["steps"][0]["status"] == "submitted"
+
+
+def test_cancel_all_twice_cancels_nothing_the_second_time():
+    _create_schema_request("all-twice")
+
+    first = client.post("/v1/admin/requests/cancel-all", headers=_ADMIN_HEADERS)
+    second = client.post("/v1/admin/requests/cancel-all", headers=_ADMIN_HEADERS)
+
+    assert len(first.json()["cancelled"]) == 1
+    assert second.status_code == 200
+    assert second.json() == {"cancelled": []}
+
+
+@pytest.mark.parametrize(("headers", "expected"), [({}, 401), ({"X-Forwarded-Email": "svc-tester"}, 403)])
+def test_cancel_all_requires_an_admin(headers, expected):
+    request_id = _create_schema_request("all-unauthorized")
+
+    assert client.post("/v1/admin/requests/cancel-all", headers=headers).status_code == expected
+    assert _get_request(request_id)["status"] != "cancelled"
+
+
 # --- Halt on failure (no auto-rollback, no further Steps) -------------------
 
 
