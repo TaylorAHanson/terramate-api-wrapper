@@ -2,14 +2,13 @@ bundle:
   name: terramate-api-wrapper
   databricks_cli_version: ">=0.283.0"
 
-# The UI ships prebuilt: build it before every deploy with
-#   npm --prefix frontend ci && npm --prefix frontend run build
-# frontend/dist is gitignored, so it must be included explicitly. There's
-# deliberately no root package.json: that would make the app run npm at
-# deploy time, and the app's build environment can't fetch packages reliably.
+# The app builds the UI at deploy time (the root package.json's `build`).
+# The lockfile stays local: its resolved URLs point at whatever registry the
+# developer's machine uses, which the app's build can't fetch from, so
+# without it npm resolves against the app's own registry.
 sync:
-  include:
-    - frontend/dist/**
+  exclude:
+    - frontend/package-lock.json
 
 # Prerequisite (out-of-band, not managed by this bundle): a secret scope
 # holding the GitHub service-account PAT, created once per workspace with

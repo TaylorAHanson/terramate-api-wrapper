@@ -28,3 +28,5 @@ frontend.log
 .isaac/
 
 .databricks/
+# Root package.json only delegates to frontend/ (Databricks Apps build hook)
+/package-lock.json

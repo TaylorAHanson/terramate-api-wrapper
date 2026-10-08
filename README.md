@@ -98,6 +98,5 @@ The GitHub service-account PAT must exist in the secret scope named by
 `databricks.yml`):
 
 ```
-npm --prefix frontend ci && npm --prefix frontend run build   # the UI ships prebuilt
 databricks bundle deploy -t dev
 ```
