@@ -244,6 +244,10 @@ class OutputReportRequest(BaseModel):
     status: Literal["done", "failed", "rejected"]
     outputs: dict = Field(default_factory=dict)
     tf_console: str = ""
+    # The apply's process exit code: 0 is success, non-zero is failure.
+    # Accepted but not yet acted on or persisted — `status` alone drives the
+    # Step's outcome.
+    exit_code: int | None = None
 
 
 class OutputReportResponse(BaseModel):

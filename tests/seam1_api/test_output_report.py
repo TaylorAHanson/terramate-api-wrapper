@@ -164,6 +164,26 @@ def test_a_done_report_drives_the_step_to_done_and_is_consumed_downstream(db_ses
     assert "ws-42" in fake.opened_pull_requests[0].body
 
 
+@pytest.mark.parametrize(("status", "exit_code"), [("done", 0), ("done", 1), ("failed", 0), ("failed", 2)])
+def test_exit_code_is_accepted_but_status_alone_decides_the_outcome(db_session, status, exit_code):
+    request_id = _create_workspace_request(f"exit-{status}-{exit_code}")
+    _drive_create_into_submitted(db_session, request_id)
+    ordinal = _ordinal(request_id, "create")
+
+    response = _report(request_id, ordinal, status=status, exit_code=exit_code)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == status
+
+
+def test_a_non_integer_exit_code_is_422(db_session):
+    request_id = _create_workspace_request("exit-bad")
+    _drive_create_into_submitted(db_session, request_id)
+    ordinal = _ordinal(request_id, "create")
+
+    assert _report(request_id, ordinal, exit_code="boom").status_code == 422
+
+
 def test_a_failed_report_drives_the_step_to_failed(db_session):
     request_id = _create_workspace_request("ops")
     _drive_create_into_submitted(db_session, request_id)

@@ -129,7 +129,8 @@ Authorization: Bearer <token>   # see Auth below
 {
   "status": "done",
   "outputs": { "workspace_id": "1234567890" },
-  "tf_console": "Apply complete! Resources: 1 added, 0 changed, 0 destroyed."
+  "tf_console": "Apply complete! Resources: 1 added, 0 changed, 0 destroyed.",
+  "exit_code": 0
 }
 ```
 
@@ -138,6 +139,7 @@ Authorization: Bearer <token>   # see Auth below
 | `status` | **Required.** One of `done`, `failed`, `rejected`. |
 | `outputs` | Apply-derived values, **keyed by the output names the Step declares** (see "Output names" below). JSON-serializable. Only meaningful for `done`; omit or send `{}` otherwise. |
 | `tf_console` | Raw apply console text. Send it for `done`/`failed`; a `rejected` PR never applied, so it has none. Optional — defaults to empty. |
+| `exit_code` | The apply's exit code: `0` is success, non-zero is failure. Optional integer; omit it for a `rejected` PR. Accepted but **not used yet**: `status` alone decides the Step's outcome. |
 
 **Responses:**
 
