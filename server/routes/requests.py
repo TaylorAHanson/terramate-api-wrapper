@@ -1,4 +1,4 @@
-"""`POST /v1/requests`, `GET /v1/requests/{id}`,
+"""`POST /v1/requests`, `GET /v1/requests`, `GET /v1/requests/{id}`,
 `GET /v1/requests/{id}/steps/{n}`, `PUT /v1/requests/{id}/steps/{n}/outputs`,
 and `POST /v1/requests/{id}/cancel` (architecture.md §5, §6, §11; ADR-0004).
 
@@ -22,11 +22,11 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Literal, Union
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from server import orchestrator
 from server.auth import require_ci_principal, resolve_requester
@@ -211,6 +211,23 @@ def create_request(
         len(playbook.steps),
     )
     return CreateRequestResponse(request_id=request_row.id, status=request_row.status)
+
+
+@router.get("/v1/requests", response_model=list[RequestDetailResponse])
+def list_requests(
+    include_finished: bool = False,
+    limit: int = Query(default=200, ge=1, le=1000),
+    session: Session = Depends(get_db),
+) -> list[RequestDetailResponse]:
+    """Requests, newest first — by default only those not yet in a terminal
+    state; `include_finished=true` adds succeeded/failed/cancelled ones."""
+    query = select(ProvisioningRequest).options(selectinload(ProvisioningRequest.steps))
+    if not include_finished:
+        query = query.where(ProvisioningRequest.status.not_in(TERMINAL_REQUEST_STATUSES))
+    rows = session.scalars(
+        query.order_by(ProvisioningRequest.created_at.desc(), ProvisioningRequest.id).limit(limit)
+    ).all()
+    return [_to_response(row) for row in rows]
 
 
 @router.get("/v1/requests/{request_id}", response_model=RequestDetailResponse)

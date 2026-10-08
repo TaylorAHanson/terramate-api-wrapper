@@ -46,6 +46,14 @@ export async function getRequest(requestId: string): Promise<RequestDetail> {
   return response.json();
 }
 
+export async function listRequests(includeFinished: boolean): Promise<RequestDetail[]> {
+  const response = await fetch(`/v1/requests?include_finished=${includeFinished}`);
+  if (!response.ok) {
+    throw new Error(`GET /v1/requests failed: ${response.status}`);
+  }
+  return response.json();
+}
+
 export interface CancelResult {
   request_id: string;
   status: string;
@@ -60,6 +68,21 @@ export async function cancelRequest(requestId: string): Promise<CancelResult> {
     throw new Error(`POST /v1/requests/${requestId}/cancel failed: ${response.status}`);
   }
   return response.json();
+}
+
+export interface CancelledRequest {
+  request_id: string;
+  type: string;
+  previous_status: string;
+  open_pr_urls: string[];
+}
+
+export async function cancelAllRequests(): Promise<CancelledRequest[]> {
+  const response = await fetch("/v1/admin/requests/cancel-all", { method: "POST" });
+  if (!response.ok) {
+    throw new Error(`POST /v1/admin/requests/cancel-all failed: ${response.status}`);
+  }
+  return (await response.json()).cancelled;
 }
 
 export interface IntakeGate {

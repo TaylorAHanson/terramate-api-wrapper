@@ -176,6 +176,24 @@ def test_cancel_an_unknown_request_is_404():
     assert response.status_code == 404
 
 
+# --- List -------------------------------------------------------------------
+
+
+def test_list_shows_pending_requests_newest_first_and_finished_ones_on_request():
+    older = _create_schema_request("list-older")
+    newer = _create_schema_request("list-newer")
+    finished = _create_schema_request("list-finished")
+    client.post(f"/v1/requests/{finished}/cancel")
+
+    pending = client.get("/v1/requests")
+    everything = client.get("/v1/requests", params={"include_finished": "true"})
+
+    assert pending.status_code == 200
+    assert [r["id"] for r in pending.json()] == [newer, older]
+    assert pending.json()[0]["steps"][0]["key"] == "add-schema"
+    assert {r["id"] for r in everything.json()} == {older, newer, finished}
+
+
 # --- Cancel all -------------------------------------------------------------
 
 
