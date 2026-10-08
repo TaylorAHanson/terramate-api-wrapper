@@ -2,6 +2,15 @@ bundle:
   name: terramate-api-wrapper
   databricks_cli_version: ">=0.283.0"
 
+# The UI ships prebuilt: build it before every deploy with
+#   npm --prefix frontend ci && npm --prefix frontend run build
+# frontend/dist is gitignored, so it must be included explicitly. There's
+# deliberately no root package.json: that would make the app run npm at
+# deploy time, and the app's build environment can't fetch packages reliably.
+sync:
+  include:
+    - frontend/dist/**
+
 # Prerequisite (out-of-band, not managed by this bundle): a secret scope
 # holding the GitHub service-account PAT, created once per workspace with
 #   databricks secrets create-scope ${var.secret_scope}

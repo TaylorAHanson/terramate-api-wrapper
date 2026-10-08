@@ -1,8 +1,0 @@
-{
-  "name": "terramate-api-wrapper",
-  "private": true,
-  "description": "Databricks Apps runs `npm install` + `npm run build` only from the app root; this builds frontend/dist, which server/main.py serves at /.",
-  "scripts": {
-    "build": "npm --prefix frontend ci && npm --prefix frontend run build"
-  }
-}
